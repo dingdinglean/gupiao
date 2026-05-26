@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "*/30 13-21 * * 1-5"
   workflow_dispatch:
+    inputs:
+      test_email:
+        description: "Only send a test email"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   scan:
@@ -24,6 +30,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore alert state
+        if: github.event.inputs.test_email != 'true'
         uses: actions/cache/restore@v4
         with:
           path: alert_state.json
@@ -42,11 +49,16 @@ jobs:
           STRICT_BLUE_ABOVE: "false"
           DAILY_LOOKBACK_BARS: "3"
           H4_LOOKBACK_BARS: "2"
-          MAX_WORKERS: "8"
-        run: python main.py --once
+          MAX_WORKERS: "3"
+        run: |
+          if [ "${{ github.event.inputs.test_email }}" = "true" ]; then
+            python main.py --test-email
+          else
+            python main.py --once
+          fi
 
       - name: Save alert state
-        if: always()
+        if: always() && github.event.inputs.test_email != 'true' && hashFiles('alert_state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: alert_state.json
