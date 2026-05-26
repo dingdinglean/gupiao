@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from urllib.request import Request, urlopen
 
 import pandas as pd
 
@@ -13,29 +12,6 @@ log = logging.getLogger(__name__)
 CACHE_DIR = Path(__file__).parent / ".cache"
 CACHE_DIR.mkdir(exist_ok=True)
 CACHE_TTL_SECONDS = 24 * 3600
-
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-
-# Fallback list of popular US tickers, used if Wikipedia is unreachable
-FALLBACK = [
-    "AAPL","MSFT","GOOGL","GOOG","AMZN","NVDA","META","TSLA","BRK-B","JPM",
-    "V","JNJ","WMT","PG","MA","UNH","HD","DIS","BAC","ADBE","CRM","NFLX",
-    "XOM","KO","PEP","PFE","TMO","ABT","CVX","ABBV","MRK","COST","AVGO",
-    "MCD","ACN","WFC","DHR","VZ","NKE","LLY","TXN","QCOM","PM","INTC","AMD",
-    "CAT","INTU","AMGN","GS","BA","ORCL","T","IBM","GE","AXP","C","MS","BLK",
-    "SPGI","BKNG","PYPL","SBUX","GILD","MDLZ","ADP","TJX","ISRG","VRTX","REGN",
-    "AMAT","MMM","F","GM","CSCO","HON","RTX","LMT","NOW","PLTR","SHOP","UBER",
-    "ABNB","SNOW","COIN","ROKU","DDOG","MDB","OKTA","NET","CRWD","FTNT","PANW",
-    "DELL","HPQ","AAL","DAL","UAL","LUV","MAR","HLT","MGM","WYNN","LVS","CCL",
-    "RCL","NCLH","BX","KKR","APO","SCHW","ICE","CME","COF","USB","PNC","TFC",
-    "MU","LRCX","KLAC","ADI","MRVL","ON","ASML","TSM","SMCI","ANET","CDNS","SNPS"
-]
-
-
-def _fetch_url(url: str) -> str:
-    req = Request(url, headers={"User-Agent": UA})
-    with urlopen(req, timeout=30) as resp:
-        return resp.read().decode("utf-8")
 
 
 def _load_or_fetch(name: str, fetcher) -> list[str]:
@@ -48,26 +24,25 @@ def _load_or_fetch(name: str, fetcher) -> list[str]:
         log.info(f"Cached {len(tickers)} tickers as '{name}'")
         return tickers
     except Exception as e:
-        log.warning(f"Fetch '{name}' failed ({e}); using fallback list")
+        log.warning(f"Fetch '{name}' failed ({e}); using stale cache if present")
         if cache.exists():
             return pd.read_csv(cache)["ticker"].astype(str).tolist()
-        return FALLBACK
+        raise
 
 
 def _fetch_sp500() -> list[str]:
-    html = _fetch_url("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-    tables = pd.read_html(html)
+    tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+    # Yahoo uses '-' instead of '.' in tickers (e.g. BRK.B -> BRK-B)
     return tables[0]["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
 
 
 def _fetch_ndx() -> list[str]:
-    html = _fetch_url("https://en.wikipedia.org/wiki/Nasdaq-100")
-    tables = pd.read_html(html)
+    tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
     for t in tables:
         for col in t.columns:
             if str(col).lower() in ("ticker", "symbol"):
                 return t[col].astype(str).str.replace(".", "-", regex=False).tolist()
-    raise RuntimeError("Could not find ticker column on NASDAQ-100 page")
+    raise RuntimeError("Could not find ticker column on NASDAQ-100 Wikipedia page")
 
 
 def get_sp500() -> list[str]:
@@ -79,4 +54,5 @@ def get_nasdaq100() -> list[str]:
 
 
 def get_universe() -> list[str]:
+    """S&P 500 ∪ NASDAQ 100, deduplicated and sorted."""
     return sorted(set(get_sp500()) | set(get_nasdaq100()))
