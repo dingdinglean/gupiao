@@ -3,6 +3,7 @@
 Usage:
     python main.py --once                 # scan once, exit
     python main.py --once --dry-run       # scan once, print results, DON'T email
+    python main.py --test-email           # send one SMTP test email, exit
     python main.py                        # loop forever, scan every 30 min
     python main.py --interval-min 15      # custom interval
     python main.py --symbols KO AAPL TSLA # ad-hoc symbol list
@@ -98,9 +99,32 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, dry_run: bool = F
         log.error(f"send_email failed: {e}", exc_info=True)
 
 
+def send_test_email(cfg: dict) -> None:
+    now = datetime.now()
+    subject = f"[选股] 邮箱发送测试 - {now:%Y-%m-%d %H:%M}"
+    text = (
+        "这是一封测试邮件。\n\n"
+        f"发送时间: {now:%Y-%m-%d %H:%M:%S}\n"
+        "如果你收到这封邮件，说明 GitHub Secrets 和 SMTP 配置已经正确。"
+    )
+    html = f"""<html><body style="font-family:Helvetica,Arial,sans-serif;color:#222">
+<h2>{subject}</h2>
+<p>这是一封测试邮件。</p>
+<p style="color:#666">发送时间: {now:%Y-%m-%d %H:%M:%S}</p>
+<p>如果你收到这封邮件，说明 GitHub Secrets 和 SMTP 配置已经正确。</p>
+</body></html>"""
+    send_email(
+        cfg["smtp_host"], cfg["smtp_port"],
+        cfg["smtp_user"], cfg["smtp_password"],
+        cfg["from_addr"], cfg["to_addrs"],
+        subject, text, html,
+    )
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="US-stock screener: blue>yellow + daily/4H 抄底 resonance")
     p.add_argument("--once", action="store_true", help="Run a single scan and exit")
+    p.add_argument("--test-email", action="store_true", help="Send a test email and exit")
     p.add_argument("--dry-run", action="store_true", help="Print results, do not send email")
     p.add_argument("--symbols", nargs="*", help="Ad-hoc symbols to scan (override universe)")
     p.add_argument("--universe", choices=["all", "sp500", "ndx"], default="all",
@@ -113,6 +137,10 @@ def parse_args():
 def main():
     args = parse_args()
     cfg = load_config()
+
+    if args.test_email:
+        send_test_email(cfg)
+        return
 
     if args.symbols:
         symbols = [s.upper() for s in args.symbols]
