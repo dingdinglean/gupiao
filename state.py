@@ -41,7 +41,9 @@ class AlertState:
 
     @staticmethod
     def key_for(hit) -> str:
-        return f"{hit.symbol}|{hit.daily_signal_at.isoformat()}|{hit.h4_signal_at.isoformat()}"
+        daily = hit.daily_signal_at.isoformat() if hit.daily_signal_at else "-"
+        h4 = hit.h4_signal_at.isoformat() if hit.h4_signal_at else "-"
+        return f"{hit.symbol}|{daily}|{h4}"
 
     def is_new(self, hit) -> bool:
         return self.key_for(hit) not in self._data

@@ -2,9 +2,7 @@
 
 Criteria for a hit:
   - Daily timeframe:   DXDX (抄底首现) within `daily_lookback_bars` bars AND blue > yellow
-  - 4H timeframe:      DXDX (抄底首现) within `h4_lookback_bars` bars AND blue > yellow
-
-The two-timeframe alignment is the "resonance" the user asked for.
+  - OR 4H timeframe:   DXDX (抄底首现) within `h4_lookback_bars` bars AND blue > yellow
 """
 from __future__ import annotations
 
@@ -24,26 +22,28 @@ log = logging.getLogger(__name__)
 @dataclass
 class Hit:
     symbol: str
-    daily_signal_at: datetime
-    h4_signal_at: datetime
+    daily_signal_at: datetime | None
+    h4_signal_at: datetime | None
     daily_close: float
-    daily_dif: float
-    h4_dif: float
-    blue_strict_daily: bool
-    blue_strict_h4: bool
+    daily_dif: float | None
+    h4_dif: float | None
+    blue_strict_daily: bool | None
+    blue_strict_h4: bool | None
     detected_at: datetime
 
     def to_text(self) -> str:
+        daily = f"{self.daily_signal_at:%Y-%m-%d}" if self.daily_signal_at else "-"
+        h4 = f"{self.h4_signal_at:%Y-%m-%d %H:%M}" if self.h4_signal_at else "-"
         return (
             f"{self.symbol:6s}  ${self.daily_close:>8.2f}  "
-            f"日 {self.daily_signal_at:%Y-%m-%d}  "
-            f"4H {self.h4_signal_at:%Y-%m-%d %H:%M}"
+            f"日 {daily}  "
+            f"4H {h4}"
         )
 
     def to_dict(self) -> dict:
         d = asdict(self)
         for k in ("daily_signal_at", "h4_signal_at", "detected_at"):
-            d[k] = d[k].isoformat()
+            d[k] = d[k].isoformat() if d[k] else None
         return d
 
 
@@ -69,43 +69,49 @@ def check_symbol(
 
     Returns a Hit if the symbol passes, else None.
     """
-    try:
-        df_d = fetch_daily(symbol, period="3y")
-        if len(df_d) < 120:   # need enough warmup for EMA-89 + divergence
-            return None
-        df_d = add_all_indicators(df_d)
+    df_d = pd.DataFrame()
+    df_h = pd.DataFrame()
 
-        df_h = fetch_4h(symbol, period="730d")
-        if len(df_h) < 120:
-            return None
-        df_h = add_all_indicators(df_h)
+    try:
+        daily = fetch_daily(symbol, period="3y")
+        if len(daily) >= 120:   # need enough warmup for EMA-89 + divergence
+            df_d = add_all_indicators(daily)
     except Exception as e:
-        log.warning(f"{symbol}: data error - {e}")
+        log.warning(f"{symbol}: daily data error - {e}")
+
+    try:
+        h4 = fetch_4h(symbol, period="730d")
+        if len(h4) >= 120:
+            df_h = add_all_indicators(h4)
+    except Exception as e:
+        log.warning(f"{symbol}: 4H data error - {e}")
+
+    if df_d.empty and df_h.empty:
         return None
 
     blue_col = "BLUE_FULLY_ABOVE_YELLOW" if require_strict_separation else "BLUE_ABOVE_YELLOW"
 
     # Recent DXDX signal with blue > yellow at the signal bar
     daily_ts = _last_signal_within(df_d, "DXDX", blue_col, daily_lookback_bars)
-    if daily_ts is None:
-        return None
     h4_ts = _last_signal_within(df_h, "DXDX", blue_col, h4_lookback_bars)
-    if h4_ts is None:
+
+    # OR logic: either daily or 4H can trigger an alert.
+    if daily_ts is None and h4_ts is None:
         return None
 
-    daily_row = df_d.loc[daily_ts]
-    h4_row    = df_h.loc[h4_ts]
-    latest_d  = df_d.iloc[-1]
+    daily_row = df_d.loc[daily_ts] if daily_ts is not None else None
+    h4_row = df_h.loc[h4_ts] if h4_ts is not None else None
+    latest = df_d.iloc[-1] if not df_d.empty else df_h.iloc[-1]
 
     return Hit(
         symbol=symbol,
-        daily_signal_at=daily_ts.to_pydatetime(),
-        h4_signal_at=h4_ts.to_pydatetime(),
-        daily_close=float(latest_d["close"]),
-        daily_dif=float(daily_row["DIF"]),
-        h4_dif=float(h4_row["DIF"]),
-        blue_strict_daily=bool(daily_row["BLUE_FULLY_ABOVE_YELLOW"]),
-        blue_strict_h4=bool(h4_row["BLUE_FULLY_ABOVE_YELLOW"]),
+        daily_signal_at=daily_ts.to_pydatetime() if daily_ts is not None else None,
+        h4_signal_at=h4_ts.to_pydatetime() if h4_ts is not None else None,
+        daily_close=float(latest["close"]),
+        daily_dif=float(daily_row["DIF"]) if daily_row is not None else None,
+        h4_dif=float(h4_row["DIF"]) if h4_row is not None else None,
+        blue_strict_daily=bool(daily_row["BLUE_FULLY_ABOVE_YELLOW"]) if daily_row is not None else None,
+        blue_strict_h4=bool(h4_row["BLUE_FULLY_ABOVE_YELLOW"]) if h4_row is not None else None,
         detected_at=datetime.now(),
     )
 

@@ -53,8 +53,7 @@ def format_hits_email(hits: list, scan_time: datetime | None = None) -> tuple[st
         f"扫描时间: {scan_time:%Y-%m-%d %H:%M:%S}",
         f"触发条件:",
         f"  · 蓝梯(EMA23) > 黄梯(EMA89)",
-        f"  · 日线 DXDX 抄底首现",
-        f"  · 4H  DXDX 抄底首现",
+        f"  · 日线 DXDX 抄底首现 或 4H DXDX 抄底首现",
         "",
         f"命中 {n} 只:",
         "",
@@ -65,16 +64,22 @@ def format_hits_email(hits: list, scan_time: datetime | None = None) -> tuple[st
 
     html_rows = []
     for h in hits:
+        daily = f"{h.daily_signal_at:%Y-%m-%d}" if h.daily_signal_at else "-"
+        h4 = f"{h.h4_signal_at:%Y-%m-%d %H:%M}" if h.h4_signal_at else "-"
         strict_tag = ""
         if h.blue_strict_daily and h.blue_strict_h4:
             strict_tag = "<span style='color:#16a34a;font-size:12px'>· 双周期完全分离</span>"
+        elif h.blue_strict_daily:
+            strict_tag = "<span style='color:#16a34a;font-size:12px'>· 日线完全分离</span>"
+        elif h.blue_strict_h4:
+            strict_tag = "<span style='color:#16a34a;font-size:12px'>· 4H完全分离</span>"
         html_rows.append(
             f"<tr>"
             f"<td style='font-weight:600'><a href='https://finance.yahoo.com/quote/{h.symbol}' "
             f"style='color:#0066cc;text-decoration:none'>{h.symbol}</a></td>"
             f"<td>${h.daily_close:.2f}</td>"
-            f"<td>{h.daily_signal_at:%Y-%m-%d}</td>"
-            f"<td>{h.h4_signal_at:%Y-%m-%d %H:%M}</td>"
+            f"<td>{daily}</td>"
+            f"<td>{h4}</td>"
             f"<td>{strict_tag}</td>"
             f"</tr>"
         )
@@ -84,7 +89,7 @@ def format_hits_email(hits: list, scan_time: datetime | None = None) -> tuple[st
 <h2 style="margin-bottom:4px">{subject}</h2>
 <p style="color:#666;margin-top:0">
 扫描时间 {scan_time:%Y-%m-%d %H:%M:%S}<br>
-条件: 蓝梯&gt;黄梯 + 日线抄底 + 4H抄底
+条件: 蓝梯&gt;黄梯 + (日线抄底 或 4H抄底)
 </p>
 <table style="border-collapse:collapse;font-size:14px">
   <thead>
