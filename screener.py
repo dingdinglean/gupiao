@@ -50,10 +50,11 @@ class Hit:
 def _last_signal_within(df: pd.DataFrame, col: str, blue_col: str, n_bars: int) -> pd.Timestamp | None:
     """Return timestamp of the most recent bar in the last `n_bars` where
     both `col` and `blue_col` are True, or None."""
-    if df.empty:
+    if df.empty or col not in df.columns or blue_col not in df.columns:
         return None
     tail = df.tail(n_bars)
-    matches = tail.index[tail[col] & tail[blue_col]]
+    mask = tail[col].fillna(False).astype(bool) & tail[blue_col].fillna(False).astype(bool)
+    matches = tail.index[mask]
     if len(matches) == 0:
         return None
     return matches[-1]
@@ -61,8 +62,8 @@ def _last_signal_within(df: pd.DataFrame, col: str, blue_col: str, n_bars: int) 
 
 def check_symbol(
     symbol: str,
-    h4_lookback_bars: int = 2,
-    daily_lookback_bars: int = 3,
+    h4_lookback_bars: int = 12,
+    daily_lookback_bars: int = 5,
     require_strict_separation: bool = False,
 ) -> Hit | None:
     """Run the full check on one symbol.
@@ -118,8 +119,8 @@ def check_symbol(
 
 def run_screener(
     symbols: list[str],
-    h4_lookback_bars: int = 2,
-    daily_lookback_bars: int = 3,
+    h4_lookback_bars: int = 12,
+    daily_lookback_bars: int = 5,
     require_strict_separation: bool = False,
     max_workers: int = 8,
 ) -> list[Hit]:
