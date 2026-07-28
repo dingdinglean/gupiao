@@ -47,8 +47,9 @@ jobs:
           EMAIL_FROM: ${{ secrets.SMTP_USER }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           STRICT_BLUE_ABOVE: "false"
-          DAILY_LOOKBACK_BARS: "3"
-          H4_LOOKBACK_BARS: "2"
+          # Kept at 1 for clarity. screener.py now enforces latest closed bar only.
+          DAILY_LOOKBACK_BARS: "1"
+          H4_LOOKBACK_BARS: "1"
           MAX_WORKERS: "3"
         run: |
           if [ "${{ github.event.inputs.test_email }}" = "true" ]; then
