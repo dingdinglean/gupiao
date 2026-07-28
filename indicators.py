@@ -5,8 +5,9 @@ Implements:
   - Dual EMA channel: BLUE (fast, period 23), YELLOW (slow, period 89)
   - "Blue above yellow" filter (蓝梯 > 黄梯)
 
-All formulas faithfully translate the original Tongdaxin script using:
-  EMA / REF / LLV / HHV / COUNT / BARSLAST primitives.
+The MACD formula follows cd.docx exactly, including its 100-bar zero-cross
+window. If no corresponding MACD zero crossing exists within the latest 100
+bars, N1/MM1 must reset to 0 instead of looking back indefinitely.
 """
 from __future__ import annotations
 
@@ -42,7 +43,7 @@ def count(condition: pd.Series, n: int) -> pd.Series:
 
 
 def barslast(condition: pd.Series) -> pd.Series:
-    """BARSLAST(cond) - bars since condition was last True (0 if current True, NaN if never)."""
+    """BARSLAST(cond) - bars since condition was last True."""
     cond_arr = condition.fillna(False).astype(bool).values
     result = np.full(len(cond_arr), np.nan)
     last_idx = -1
@@ -55,9 +56,7 @@ def barslast(condition: pd.Series) -> pd.Series:
     return pd.Series(result, index=condition.index)
 
 
-# ---------- Dynamic-lookback primitives (lookback length varies per bar) ----------
-# Tongdaxin happily accepts LLV(X, N) where N is itself a series.
-# Pandas rolling does not, so we implement these explicitly.
+# ---------- Dynamic-lookback primitives ----------
 
 def _to_int_lookback(value, fallback: int = 1) -> int:
     if value is None or (isinstance(value, float) and np.isnan(value)):
@@ -118,18 +117,26 @@ def _bfalse(s: pd.Series) -> pd.Series:
     return s.fillna(False).astype(bool)
 
 
+def _cd_zero_cross_lookback(condition: pd.Series) -> pd.Series:
+    """Exact cd.docx N1/MM1 rule.
+
+    IF(COUNT(condition, 100) > 0, BARSLAST(condition), 0)
+
+    The old implementation used BARSLAST across all available history. That
+    can create false DXDX signals when the last zero crossing is older than
+    100 bars, because cd.docx explicitly resets the lookback to zero.
+    """
+    recent_cross_exists = count(condition, 100) > 0
+    return barslast(condition).where(recent_cross_exists, 0).fillna(0)
+
+
 # ---------- MACD divergence system (the original 抄底/卖出 formula) ----------
 
 def compute_macd_divergence(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute the full MACD divergence signal set.
+    """Compute the full MACD divergence signal set from cd.docx.
 
-    Input df: must have columns ['open', 'high', 'low', 'close'].
-    Adds columns:
-        DIF, DEA, MACD_bar  - standard MACD components
-        LLL    - 底背离首现 (first occurrence of bottom divergence)
-        DXDX   - 抄底首现   (structure-confirmed bottom)
-        DBL    - 顶背离首现 (first occurrence of top divergence)
-        DBJGXC - 卖出首现   (structure-confirmed top)
+    Input df must have columns ['open', 'high', 'low', 'close'].
+    Adds DIF, DEA, MACD_bar, LLL, DXDX, DBL and DBJGXC.
     """
     close = df["close"]
 
@@ -138,52 +145,54 @@ def compute_macd_divergence(df: pd.DataFrame) -> pd.DataFrame:
     A = ema(D, 9)
     M = (D - A) * 2
 
-    # Zero-cross trackers
-    down_cross = (ref(M, 1) >= 0) & (M < 0)   # M crossed below 0
-    up_cross   = (ref(M, 1) <= 0) & (M > 0)   # M crossed above 0
-    N1  = barslast(down_cross)
-    MM1 = barslast(up_cross)
+    # Exact cd.docx zero-cross trackers: only the latest 100 bars count.
+    down_cross = (ref(M, 1) >= 0) & (M < 0)
+    up_cross = (ref(M, 1) <= 0) & (M > 0)
+    N1 = _cd_zero_cross_lookback(down_cross)
+    MM1 = _cd_zero_cross_lookback(up_cross)
 
     # ----- Bottom divergence (抄底) -----
     CC1 = llv_dyn(close, N1 + 1)
-    CC2 = ref_dyn(CC1, MM1 + 1)
-    CC3 = ref_dyn(CC2, MM1 + 1)
+    CC2 = ref_dyn(CC1, (MM1 + 1).clip(lower=1))
+    CC3 = ref_dyn(CC2, (MM1 + 1).clip(lower=1))
     DIFL1 = llv_dyn(D, N1 + 1)
-    DIFL2 = ref_dyn(DIFL1, MM1 + 1)
-    DIFL3 = ref_dyn(DIFL2, MM1 + 1)
+    DIFL2 = ref_dyn(DIFL1, (MM1 + 1).clip(lower=1))
+    DIFL3 = ref_dyn(DIFL2, (MM1 + 1).clip(lower=1))
 
-    AAA = (CC1 < CC2) & (DIFL1 > DIFL2) & (ref(M, 1) < 0) & (D < 0)            # 普通底背离
-    BBB = (CC1 < CC3) & (DIFL1 < DIFL2) & (DIFL1 > DIFL3) & (ref(M, 1) < 0) & (D < 0)  # 隐藏底背离
+    AAA = (CC1 < CC2) & (DIFL1 > DIFL2) & (ref(M, 1) < 0) & (D < 0)
+    BBB = (CC1 < CC3) & (DIFL1 < DIFL2) & (DIFL1 > DIFL3) & (ref(M, 1) < 0) & (D < 0)
     CCC = (AAA | BBB) & (D < 0)
-    LLL = (~_bfalse(ref(CCC, 1))) & _bfalse(CCC)   # 底背离首现
+    LLL = (~_bfalse(ref(CCC, 1))) & _bfalse(CCC)
 
-    # Structure of bottom: previous bar had CCC AND |D| is shrinking >= 1%
-    JJJ  = _bfalse(ref(CCC, 1)) & (ref(D, 1).abs() >= D.abs() * 1.01)
-    DXDX = (~_bfalse(ref(JJJ, 1))) & _bfalse(JJJ)  # 抄底首现
+    # cd.docx:
+    # JJJ  := REF(CCC,1) AND ABS(REF(DIFF,1)) >= ABS(DIFF) * 1.01
+    # DXDX := REF(JJJ,1)=0 AND JJJ
+    JJJ = _bfalse(ref(CCC, 1)) & (ref(D, 1).abs() >= D.abs() * 1.01)
+    DXDX = (~_bfalse(ref(JJJ, 1))) & _bfalse(JJJ)
 
     # ----- Top divergence (卖出) -----
     CH1 = hhv_dyn(close, MM1 + 1)
-    CH2 = ref_dyn(CH1, N1 + 1)
-    CH3 = ref_dyn(CH2, N1 + 1)
+    CH2 = ref_dyn(CH1, (N1 + 1).clip(lower=1))
+    CH3 = ref_dyn(CH2, (N1 + 1).clip(lower=1))
     DIFH1 = hhv_dyn(D, MM1 + 1)
-    DIFH2 = ref_dyn(DIFH1, N1 + 1)
-    DIFH3 = ref_dyn(DIFH2, N1 + 1)
+    DIFH2 = ref_dyn(DIFH1, (N1 + 1).clip(lower=1))
+    DIFH3 = ref_dyn(DIFH2, (N1 + 1).clip(lower=1))
 
-    ZJDBL = (CH1 > CH2) & (DIFH1 < DIFH2) & (ref(M, 1) > 0) & (D > 0)            # 普通顶背离
-    GXDBL = (CH1 > CH3) & (DIFH1 > DIFH2) & (DIFH1 < DIFH3) & (ref(M, 1) > 0) & (D > 0)  # 隐藏顶背离
-    DBBL  = (ZJDBL | GXDBL) & (D > 0)
-    DBL   = (~_bfalse(ref(DBBL, 1))) & _bfalse(DBBL) & (D > A)   # 顶背离首现
+    ZJDBL = (CH1 > CH2) & (DIFH1 < DIFH2) & (ref(M, 1) > 0) & (D > 0)
+    GXDBL = (CH1 > CH3) & (DIFH1 > DIFH2) & (DIFH1 < DIFH3) & (ref(M, 1) > 0) & (D > 0)
+    DBBL = (ZJDBL | GXDBL) & (D > 0)
+    DBL = (~_bfalse(ref(DBBL, 1))) & _bfalse(DBBL) & (D > A)
 
-    DBJG   = _bfalse(ref(DBBL, 1)) & (ref(D, 1) >= D * 1.01)
-    DBJGXC = (~_bfalse(ref(DBJG, 1))) & _bfalse(DBJG)   # 卖出首现
+    DBJG = _bfalse(ref(DBBL, 1)) & (ref(D, 1) >= D * 1.01)
+    DBJGXC = (~_bfalse(ref(DBJG, 1))) & _bfalse(DBJG)
 
     out = df.copy()
     out["DIF"] = D
     out["DEA"] = A
     out["MACD_bar"] = M
-    out["LLL"]    = _bfalse(LLL)
-    out["DXDX"]   = _bfalse(DXDX)
-    out["DBL"]    = _bfalse(DBL)
+    out["LLL"] = _bfalse(LLL)
+    out["DXDX"] = _bfalse(DXDX)
+    out["DBL"] = _bfalse(DBL)
     out["DBJGXC"] = _bfalse(DBJGXC)
     return out
 
@@ -195,26 +204,20 @@ def compute_ema_channels(
     fast_period: int = 23,
     slow_period: int = 89,
 ) -> pd.DataFrame:
-    """Compute blue (fast=23) and yellow (slow=89) EMA channels of HIGH/LOW.
-
-    Adds columns:
-        BLUE_UP, BLUE_DW         (蓝梯 upper/lower)
-        YELLOW_UP, YELLOW_DW     (黄梯 upper/lower)
-        BLUE_ABOVE_YELLOW        (loose: both bounds of blue above corresponding yellow)
-        BLUE_FULLY_ABOVE_YELLOW  (strict: blue's bottom above yellow's top)
-    """
+    """Compute blue (fast=23) and yellow (slow=89) EMA channels."""
     out = df.copy()
-    out["BLUE_UP"]   = ema(df["high"], fast_period)
-    out["BLUE_DW"]   = ema(df["low"],  fast_period)
+    out["BLUE_UP"] = ema(df["high"], fast_period)
+    out["BLUE_DW"] = ema(df["low"], fast_period)
     out["YELLOW_UP"] = ema(df["high"], slow_period)
-    out["YELLOW_DW"] = ema(df["low"],  slow_period)
-    out["BLUE_ABOVE_YELLOW"]       = (out["BLUE_UP"] > out["YELLOW_UP"]) & (out["BLUE_DW"] > out["YELLOW_DW"])
+    out["YELLOW_DW"] = ema(df["low"], slow_period)
+    out["BLUE_ABOVE_YELLOW"] = (
+        (out["BLUE_UP"] > out["YELLOW_UP"])
+        & (out["BLUE_DW"] > out["YELLOW_DW"])
+    )
     out["BLUE_FULLY_ABOVE_YELLOW"] = out["BLUE_DW"] > out["YELLOW_UP"]
     return out
 
 
 def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Pipeline: MACD divergence + EMA channels."""
-    df = compute_macd_divergence(df)
-    df = compute_ema_channels(df)
-    return df
+    """Pipeline: cd.docx MACD divergence + EMA channels."""
+    return compute_ema_channels(compute_macd_divergence(df))
