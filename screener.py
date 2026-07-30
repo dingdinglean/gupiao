@@ -1,10 +1,12 @@
-"""Strict multi-timeframe screener.
+"""Strict multi-timeframe screener aligned with the live chart.
 
-A symbol is a hit only when the latest fully closed candle satisfies either:
-  - Daily: DXDX (抄底首现) AND blue > yellow
-  - 4H:    DXDX (抄底首现) AND blue > yellow
+A symbol is a hit only when the latest available bar satisfies either:
+  - Daily: DXDX (cd.docx 抄底) AND blue > yellow
+  - 4H:    DXDX (cd.docx 抄底) AND blue > yellow
 
-Older signals, lower-timeframe signals, and still-forming candles never trigger.
+The latest available bar may still be forming. This intentionally matches the
+real-time indicator shown in Futu/other charting apps during US market hours.
+Older bars and lower-timeframe signals never trigger.
 """
 from __future__ import annotations
 
@@ -12,7 +14,6 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -20,9 +21,6 @@ from data_fetcher import fetch_daily, fetch_4h
 from indicators import add_all_indicators
 
 log = logging.getLogger(__name__)
-
-NEW_YORK = ZoneInfo("America/New_York")
-CLOSE_GRACE = pd.Timedelta(minutes=20)
 
 
 @dataclass
@@ -48,82 +46,32 @@ class Hit:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        for k in ("daily_signal_at", "h4_signal_at", "detected_at"):
-            d[k] = d[k].isoformat() if d[k] else None
+        for key in ("daily_signal_at", "h4_signal_at", "detected_at"):
+            d[key] = d[key].isoformat() if d[key] else None
         return d
-
-
-def _as_new_york_time(now: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
-    ts = pd.Timestamp(now if now is not None else datetime.now(tz=NEW_YORK))
-    if ts.tzinfo is None:
-        return ts.tz_localize(NEW_YORK)
-    return ts.tz_convert(NEW_YORK)
-
-
-def _latest_closed_position(
-    df: pd.DataFrame,
-    timeframe: str,
-    now: datetime | pd.Timestamp | None = None,
-) -> int | None:
-    """Return the position of the latest fully closed candle.
-
-    A 20-minute grace period avoids selecting Yahoo bars that are still being
-    finalized. For the second US-session 4H bucket, the actual close is capped
-    at the regular-session close (16:00 ET), not the synthetic 17:30 label.
-    """
-    if df.empty:
-        return None
-
-    now_et = _as_new_york_time(now)
-    idx = pd.DatetimeIndex(df.index)
-    if idx.tz is None:
-        idx_et = idx.tz_localize(NEW_YORK)
-    else:
-        idx_et = idx.tz_convert(NEW_YORK)
-
-    session_close = idx_et.normalize() + pd.Timedelta(hours=16) + CLOSE_GRACE
-
-    if timeframe == "daily":
-        closed_at = session_close
-    elif timeframe == "4h":
-        label_close = idx_et + CLOSE_GRACE
-        closed_at = pd.DatetimeIndex(
-            [min(label_time, market_close) for label_time, market_close in zip(label_close, session_close)]
-        )
-    else:
-        raise ValueError(f"Unsupported timeframe: {timeframe}")
-
-    positions = [i for i, is_closed in enumerate(closed_at <= now_et) if bool(is_closed)]
-    return positions[-1] if positions else None
-
-
-def _latest_closed_row(
-    df: pd.DataFrame,
-    timeframe: str,
-    now: datetime | pd.Timestamp | None = None,
-) -> tuple[pd.Timestamp, pd.Series] | None:
-    pos = _latest_closed_position(df, timeframe, now)
-    if pos is None:
-        return None
-    return pd.Timestamp(df.index[pos]), df.iloc[pos]
 
 
 def _is_true(value) -> bool:
     return False if pd.isna(value) else bool(value)
 
 
-def _signal_on_latest_closed(
+def _latest_available_row(df: pd.DataFrame) -> tuple[pd.Timestamp, pd.Series] | None:
+    """Return the latest bar supplied by the data source, including a live bar."""
+    if df.empty:
+        return None
+    return pd.Timestamp(df.index[-1]), df.iloc[-1]
+
+
+def _signal_on_latest_available(
     df: pd.DataFrame,
     signal_col: str,
     blue_col: str,
-    timeframe: str,
-    now: datetime | pd.Timestamp | None = None,
 ) -> tuple[pd.Timestamp | None, pd.Series | None]:
-    """Check only the latest closed candle; never search older candles."""
+    """Check only the latest available bar; never search backward for old signals."""
     if df.empty or signal_col not in df.columns or blue_col not in df.columns:
         return None, None
 
-    latest = _latest_closed_row(df, timeframe, now)
+    latest = _latest_available_row(df)
     if latest is None:
         return None, None
 
@@ -140,11 +88,10 @@ def check_symbol(
     require_strict_separation: bool = False,
     now: datetime | pd.Timestamp | None = None,
 ) -> Hit | None:
-    """Run the strict check on one symbol.
+    """Run the strict live-bar check on one symbol.
 
-    The lookback arguments remain only for backward compatibility with older
-    callers. They are intentionally ignored: only the latest closed candle is
-    eligible to trigger a push.
+    The lookback arguments remain only for compatibility with older callers.
+    They are ignored: an older DXDX is never allowed to trigger a push.
     """
     del h4_lookback_bars, daily_lookback_bars
 
@@ -153,27 +100,31 @@ def check_symbol(
 
     try:
         daily = fetch_daily(symbol, period="3y")
-        if len(daily) >= 120:  # enough warmup for EMA-89 + divergence
+        if len(daily) >= 120:
             df_d = add_all_indicators(daily)
-    except Exception as e:
-        log.warning(f"{symbol}: daily data error - {e}")
+    except Exception as exc:
+        log.warning(f"{symbol}: daily data error - {exc}")
 
     try:
         h4 = fetch_4h(symbol, period="730d")
         if len(h4) >= 120:
             df_h = add_all_indicators(h4)
-    except Exception as e:
-        log.warning(f"{symbol}: 4H data error - {e}")
+    except Exception as exc:
+        log.warning(f"{symbol}: 4H data error - {exc}")
 
     if df_d.empty and df_h.empty:
         return None
 
-    blue_col = "BLUE_FULLY_ABOVE_YELLOW" if require_strict_separation else "BLUE_ABOVE_YELLOW"
+    blue_col = (
+        "BLUE_FULLY_ABOVE_YELLOW"
+        if require_strict_separation
+        else "BLUE_ABOVE_YELLOW"
+    )
 
-    # Hard rule: latest fully closed daily OR latest fully closed 4H candle.
-    # The signal and blue>yellow condition must be true on that same candle.
-    daily_ts, daily_latest = _signal_on_latest_closed(df_d, "DXDX", blue_col, "daily", now)
-    h4_ts, h4_latest = _signal_on_latest_closed(df_h, "DXDX", blue_col, "4h", now)
+    # Hard rule: only the newest available daily or 4H bar is eligible.
+    # DXDX and blue>yellow must both be true on that same timeframe/bar.
+    daily_ts, daily_latest = _signal_on_latest_available(df_d, "DXDX", blue_col)
+    h4_ts, h4_latest = _signal_on_latest_available(df_h, "DXDX", blue_col)
 
     if daily_ts is None and h4_ts is None:
         return None
@@ -181,11 +132,12 @@ def check_symbol(
     daily_signal_row = df_d.loc[daily_ts] if daily_ts is not None else None
     h4_signal_row = df_h.loc[h4_ts] if h4_ts is not None else None
 
+    # Prefer the live daily close for display; fall back to 4H only if daily failed.
     price_row = daily_latest if daily_latest is not None else h4_latest
     if price_row is None:
         return None
 
-    detected = _as_new_york_time(now).to_pydatetime() if now is not None else datetime.now()
+    detected = pd.Timestamp(now).to_pydatetime() if now is not None else datetime.now()
 
     return Hit(
         symbol=symbol,
@@ -213,32 +165,32 @@ def run_screener(
     require_strict_separation: bool = False,
     max_workers: int = 8,
 ) -> list[Hit]:
-    """Scan symbols in parallel and return strict latest-closed-bar hits."""
+    """Scan symbols in parallel and return strict latest-live-bar hits."""
     hits: list[Hit] = []
     total = len(symbols)
     done = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            ex.submit(
+            executor.submit(
                 check_symbol,
-                s,
+                symbol,
                 h4_lookback_bars,
                 daily_lookback_bars,
                 require_strict_separation,
-            ): s
-            for s in symbols
+            ): symbol
+            for symbol in symbols
         }
-        for fut in as_completed(futures):
+        for future in as_completed(futures):
             done += 1
-            sym = futures[fut]
+            symbol = futures[future]
             try:
-                result = fut.result()
+                result = future.result()
                 if result is not None:
                     log.info(f"HIT  [{done}/{total}] {result.to_text()}")
                     hits.append(result)
                 elif done % 50 == 0:
                     log.info(f"... progress {done}/{total}")
-            except Exception as e:
-                log.warning(f"{sym}: {e}")
+            except Exception as exc:
+                log.warning(f"{symbol}: {exc}")
     return hits
