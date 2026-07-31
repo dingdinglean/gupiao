@@ -1,17 +1,24 @@
-"""Yahoo Finance data fetching + 4H resampling aligned to US market hours."""
+"""Yahoo Finance data fetching restricted to US regular trading hours."""
 from __future__ import annotations
 
 import logging
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import yfinance as yf
 
 log = logging.getLogger(__name__)
 
+NEW_YORK = ZoneInfo("America/New_York")
+MARKET_OPEN_MINUTE = 9 * 60 + 30
+SECOND_BAR_START_MINUTE = 13 * 60 + 30
+MARKET_CLOSE_MINUTE = 16 * 60
+
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    # Multi-index from yfinance with multiple tickers - flatten if so
+    # Multi-index from yfinance with multiple tickers - flatten if so.
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df = df.rename(columns=str.lower)
@@ -19,43 +26,97 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     return df[cols].dropna()
 
 
+def _as_new_york_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy whose DatetimeIndex is in America/New_York."""
+    if df.empty:
+        return df
+
+    out = df.copy()
+    idx = pd.DatetimeIndex(out.index)
+    if idx.tz is None:
+        idx = idx.tz_localize(NEW_YORK)
+    else:
+        idx = idx.tz_convert(NEW_YORK)
+    out.index = idx
+    return out
+
+
+def _regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep weekday bars from 09:30 inclusive to 16:00 exclusive, New York time."""
+    if df.empty:
+        return df
+
+    out = _as_new_york_index(df)
+    out = out[out.index.dayofweek < 5]
+
+    minutes = out.index.hour * 60 + out.index.minute
+    in_session = (minutes >= MARKET_OPEN_MINUTE) & (minutes < MARKET_CLOSE_MINUTE)
+    return out.loc[in_session]
+
+
 def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:
-    """Daily bars. 3y of history gives plenty of room for the indicator warmup."""
-    df = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=True)
+    """Daily bars without pre-market or after-hours data."""
+    df = yf.Ticker(symbol).history(
+        period=period,
+        interval="1d",
+        auto_adjust=True,
+        prepost=False,
+    )
     return _normalize(df)
 
 
 def fetch_hourly(symbol: str, period: str = "730d") -> pd.DataFrame:
-    """Hourly bars. Yahoo caps 1H history at ~730 days."""
-    df = yf.Ticker(symbol).history(period=period, interval="1h", auto_adjust=True)
-    return _normalize(df)
+    """Regular-session hourly bars. Yahoo caps 1H history at about 730 days."""
+    df = yf.Ticker(symbol).history(
+        period=period,
+        interval="1h",
+        auto_adjust=True,
+        prepost=False,
+    )
+    return _regular_session_only(_normalize(df))
 
 
 def resample_to_4h(hourly: pd.DataFrame) -> pd.DataFrame:
-    """Resample 1H bars to 4H bars, anchored to US market open (09:30 ET).
+    """Build two bars per US regular session using New York wall-clock time.
 
-    For each trading day yfinance returns hourly bars at:
-      09:30, 10:30, 11:30, 12:30, 13:30, 14:30, 15:30
-    We bucket them as two "4H" bars per session:
-      Bar 1: 09:30-13:30  (4 hourly bars)
-      Bar 2: 13:30-17:30  (only 13:30/14:30/15:30 hourly bars; closes at market close)
+    Bar 1 contains 09:30, 10:30, 11:30 and 12:30 hourly bars and is labelled
+    13:30 ET. Bar 2 contains 13:30, 14:30 and 15:30 hourly bars and is labelled
+    16:00 ET.
 
-    This matches how most US-equity 4H charts work.
+    Grouping each trading session separately avoids the one-hour DST drift that
+    can occur when pandas resampling is anchored to a fixed historical timestamp.
     """
     if hourly.empty:
         return hourly
-    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
 
-    # yfinance returns tz-aware index in market local time (America/New_York).
-    # Anchor 4H buckets to 09:30 ET.
-    if hourly.index.tz is None:
-        hourly = hourly.tz_localize("America/New_York")
+    hourly = _regular_session_only(hourly)
+    if hourly.empty:
+        return hourly
 
-    origin = pd.Timestamp("1970-01-01 09:30:00", tz="America/New_York")
-    df4 = hourly.resample("4h", origin=origin, label="right", closed="left").agg(agg)
-    # Drop the buckets that have no underlying bars (weekends, pre/post-market gaps)
-    df4 = df4.dropna(subset=["close"])
-    return df4
+    work = hourly.copy()
+    work["_session"] = work.index.normalize()
+    minutes = work.index.hour * 60 + work.index.minute
+    work["_bucket"] = (minutes >= SECOND_BAR_START_MINUTE).astype(int)
+
+    agg = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+    out = work.groupby(["_session", "_bucket"], sort=True).agg(agg)
+
+    bar_ends: list[pd.Timestamp] = []
+    for session, bucket in out.index:
+        if int(bucket) == 0:
+            bar_end = session + pd.Timedelta(hours=13, minutes=30)
+        else:
+            bar_end = session + pd.Timedelta(hours=16)
+        bar_ends.append(bar_end)
+
+    out.index = pd.DatetimeIndex(bar_ends, name=hourly.index.name)
+    return out.dropna(subset=["close"])
 
 
 def fetch_4h(symbol: str, period: str = "730d") -> pd.DataFrame:
