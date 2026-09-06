@@ -24,21 +24,27 @@ log = logging.getLogger("dxdx-radar")
 OUTPUT_DIR = Path("output")
 
 
-def load_config() -> dict:
+def load_config(*, require_smtp: bool = False) -> dict:
     load_dotenv()
     required = ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "EMAIL_TO")
     missing = [name for name in required if not os.getenv(name)]
-    if missing:
+    if require_smtp and missing:
         raise SystemExit(f"Missing required SMTP configuration: {', '.join(missing)}")
     return {
-        "smtp_host": os.environ["SMTP_HOST"],
-        "smtp_port": int(os.environ["SMTP_PORT"]),
-        "smtp_user": os.environ["SMTP_USER"],
-        "smtp_password": os.environ["SMTP_PASSWORD"],
-        "to_addrs": [value.strip() for value in os.environ["EMAIL_TO"].replace(";", ",").split(",") if value.strip()],
+        "smtp_host": os.getenv("SMTP_HOST"),
+        "smtp_port": int(os.getenv("SMTP_PORT", "0")),
+        "smtp_user": os.getenv("SMTP_USER"),
+        "smtp_password": os.getenv("SMTP_PASSWORD"),
+        "to_addrs": [value.strip() for value in os.getenv("EMAIL_TO", "").replace(";", ",").split(",") if value.strip()],
         "strict_separation": os.getenv("STRICT_BLUE_ABOVE", "false").lower() == "true",
         "max_workers": int(os.getenv("MAX_WORKERS", "6")),
     }
+
+
+def require_smtp_config(cfg: dict) -> None:
+    missing = [name for name, value in {"SMTP_HOST": cfg["smtp_host"], "SMTP_PORT": cfg["smtp_port"], "SMTP_USER": cfg["smtp_user"], "SMTP_PASSWORD": cfg["smtp_password"], "EMAIL_TO": cfg["to_addrs"]}.items() if not value]
+    if missing:
+        raise RuntimeError("Missing required SMTP configuration: " + ", ".join(missing))
 
 
 def write_reports(signals: list[Signal], stats: ScanStats, *, email_sent: bool, detected_at: datetime) -> None:
@@ -76,6 +82,7 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool 
         log.info("Dry run: %s new DXDX signal(s); email skipped.", len(new_signals))
         write_reports(new_signals, stats, email_sent=False, detected_at=started)
         return new_signals, stats, False
+    require_smtp_config(cfg)
     subject, body = format_signals_email(new_signals, pool_count=stats.pool_count, scan_time=started)
     send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], subject, body)
     for signal in new_signals:
@@ -86,6 +93,7 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool 
 
 
 def send_test_email(cfg: dict) -> None:
+    require_smtp_config(cfg)
     now = datetime.now()
     send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], "【美股双周期抄底雷达】Gmail 连通性测试", f"Gmail SMTP 连通性测试成功。\n时间：{now:%Y-%m-%d %H:%M:%S}\n")
 
@@ -99,7 +107,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    config = load_config()
+    config = load_config(require_smtp=args.test_email)
     if args.test_email:
         send_test_email(config)
         return

@@ -127,6 +127,11 @@ class DualTimeframeRadarTests(unittest.TestCase):
             sent.assert_not_called()
             self.assertTrue((Path(directory) / "dxdx_report.txt").exists())
 
+    def test_no_signal_does_not_require_smtp_settings(self):
+        with patch.dict("os.environ", {}, clear=True):
+            config = main.load_config()
+        self.assertIsNone(config["smtp_host"])
+
     def test_gmail_starttls_mock(self):
         calls = []
         class FakeSMTP:
