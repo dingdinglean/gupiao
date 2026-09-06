@@ -30,9 +30,14 @@ def load_config(*, require_smtp: bool = False) -> dict:
     missing = [name for name in required if not os.getenv(name)]
     if require_smtp and missing:
         raise SystemExit(f"Missing required SMTP configuration: {', '.join(missing)}")
+    port_raw = os.getenv("SMTP_PORT") or "0"
+    try:
+        smtp_port = int(port_raw)
+    except ValueError:
+        smtp_port = 0
     return {
         "smtp_host": os.getenv("SMTP_HOST"),
-        "smtp_port": int(os.getenv("SMTP_PORT", "0")),
+        "smtp_port": smtp_port,
         "smtp_user": os.getenv("SMTP_USER"),
         "smtp_password": os.getenv("SMTP_PASSWORD"),
         "to_addrs": [value.strip() for value in os.getenv("EMAIL_TO", "").replace(";", ",").split(",") if value.strip()],
