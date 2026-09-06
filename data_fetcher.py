@@ -5,7 +5,6 @@ import logging
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import yfinance as yf
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +55,7 @@ def _regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
 
 def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:
     """Daily bars without pre-market or after-hours data."""
+    import yfinance as yf
     df = yf.Ticker(symbol).history(
         period=period,
         interval="1d",
@@ -67,6 +67,7 @@ def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:
 
 def fetch_hourly(symbol: str, period: str = "730d") -> pd.DataFrame:
     """Regular-session hourly bars. Yahoo caps 1H history at about 730 days."""
+    import yfinance as yf
     df = yf.Ticker(symbol).history(
         period=period,
         interval="1h",

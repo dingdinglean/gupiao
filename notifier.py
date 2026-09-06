@@ -1,112 +1,65 @@
-"""Email notifier (QQ Mail / Gmail compatible SMTP).
-
-For QQ Mail you need an 'authorization code' (授权码), not your QQ password.
-See README.md for instructions.
-"""
+"""Chinese-first Gmail-compatible SMTP delivery for DXDX alerts."""
 from __future__ import annotations
 
 import logging
 import smtplib
 import ssl
+import time
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+from email.message import EmailMessage
 
 log = logging.getLogger(__name__)
 
 
-def send_email(
-    smtp_host: str,
-    smtp_port: int,
-    smtp_user: str,
-    smtp_password: str,
-    from_addr: str,
-    to_addrs: list[str],
-    subject: str,
-    body_text: str,
-    body_html: str | None = None,
-):
-    """Send via SMTPS (SSL). Works for QQ (smtp.qq.com:465) and Gmail (smtp.gmail.com:465)."""
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = from_addr
-    msg["To"] = ", ".join(to_addrs)
-    msg.attach(MIMEText(body_text, "plain", "utf-8"))
-    if body_html:
-        msg.attach(MIMEText(body_html, "html", "utf-8"))
+def send_email(smtp_host: str, smtp_port: int, smtp_user: str, smtp_password: str, to_addrs: list[str], subject: str, body_text: str, *, retries: int = 1) -> None:
+    """Use STARTTLS on 587 (Gmail) and implicit TLS on 465; retry once."""
+    message = EmailMessage()
+    message["From"] = smtp_user
+    message["To"] = ", ".join(to_addrs)
+    message["Subject"] = subject
+    message.set_content(body_text)
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            if smtp_port == 587:
+                with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+                    server.ehlo()
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
+                    server.login(smtp_user, smtp_password)
+                    server.send_message(message)
+            else:
+                with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ssl.create_default_context(), timeout=30) as server:
+                    server.login(smtp_user, smtp_password)
+                    server.send_message(message)
+            log.info("Email sent successfully to configured recipient(s)")
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                log.warning("SMTP attempt %s failed; retrying once: %r", attempt + 1, exc)
+                time.sleep(2)
+    raise last_error or RuntimeError("SMTP delivery failed")
 
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ctx, timeout=30) as srv:
-        srv.login(smtp_user, smtp_password)
-        srv.sendmail(from_addr, to_addrs, msg.as_string())
-    log.info(f"Email sent to {to_addrs}")
 
-
-def format_hits_email(hits: list, scan_time: datetime | None = None) -> tuple[str, str, str]:
-    """Build subject + text + html body for the email."""
-    if scan_time is None:
-        scan_time = datetime.now()
-    n = len(hits)
-    subject = f"[选股] {n} 只美股触发抄底信号 - {scan_time:%Y-%m-%d %H:%M}"
-
-    text_lines = [
-        f"扫描时间: {scan_time:%Y-%m-%d %H:%M:%S}",
-        f"触发条件:",
-        f"  · 蓝梯(EMA23) > 黄梯(EMA89)",
-        f"  · 日线 DXDX 抄底首现 或 4H DXDX 抄底首现",
-        "",
-        f"命中 {n} 只:",
-        "",
-    ]
-    for h in hits:
-        text_lines.append("  " + h.to_text())
-    body_text = "\n".join(text_lines)
-
-    html_rows = []
-    for h in hits:
-        daily = f"{h.daily_signal_at:%Y-%m-%d}" if h.daily_signal_at else "-"
-        h4 = f"{h.h4_signal_at:%Y-%m-%d %H:%M}" if h.h4_signal_at else "-"
-        strict_tag = ""
-        if h.blue_strict_daily and h.blue_strict_h4:
-            strict_tag = "<span style='color:#16a34a;font-size:12px'>· 双周期完全分离</span>"
-        elif h.blue_strict_daily:
-            strict_tag = "<span style='color:#16a34a;font-size:12px'>· 日线完全分离</span>"
-        elif h.blue_strict_h4:
-            strict_tag = "<span style='color:#16a34a;font-size:12px'>· 4H完全分离</span>"
-        html_rows.append(
-            f"<tr>"
-            f"<td style='font-weight:600'><a href='https://finance.yahoo.com/quote/{h.symbol}' "
-            f"style='color:#0066cc;text-decoration:none'>{h.symbol}</a></td>"
-            f"<td>${h.daily_close:.2f}</td>"
-            f"<td>{daily}</td>"
-            f"<td>{h4}</td>"
-            f"<td>{strict_tag}</td>"
-            f"</tr>"
-        )
-
-    body_html = f"""\
-<html><body style="font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;color:#222">
-<h2 style="margin-bottom:4px">{subject}</h2>
-<p style="color:#666;margin-top:0">
-扫描时间 {scan_time:%Y-%m-%d %H:%M:%S}<br>
-条件: 蓝梯&gt;黄梯 + (日线抄底 或 4H抄底)
-</p>
-<table style="border-collapse:collapse;font-size:14px">
-  <thead>
-    <tr style="background:#f3f4f6">
-      <th style="padding:8px 12px;text-align:left;border:1px solid #ddd">代码</th>
-      <th style="padding:8px 12px;text-align:left;border:1px solid #ddd">收盘价</th>
-      <th style="padding:8px 12px;text-align:left;border:1px solid #ddd">日抄底</th>
-      <th style="padding:8px 12px;text-align:left;border:1px solid #ddd">4H抄底</th>
-      <th style="padding:8px 12px;text-align:left;border:1px solid #ddd">标签</th>
-    </tr>
-  </thead>
-  <tbody>
-    {''.join(html_rows)}
-  </tbody>
-</table>
-<p style="color:#999;font-size:12px;margin-top:20px">
-本邮件由 stock_screener 自动发送 · 仅供研究参考,不构成投资建议
-</p>
-</body></html>"""
-    return subject, body_text, body_html
+def format_signals_email(signals: list, *, pool_count: int, scan_time: datetime | None = None) -> tuple[str, str]:
+    """Keep the alert short and Chinese-first; code symbols remain English."""
+    scan_time = scan_time or datetime.now()
+    grouped = {level: [signal for signal in signals if signal.signal_level == level] for level in ("S", "A", "B")}
+    subject = f"【美股双周期抄底雷达】S{len(grouped['S'])} A{len(grouped['A'])} B{len(grouped['B'])}｜{scan_time:%Y-%m-%d}"
+    labels = {"S": "🥇 S级｜双周期共振", "A": "🟢 A级｜4H抄底", "B": "🔵 B级｜日线抄底"}
+    lines = ["【美股双周期抄底雷达】", "", "🔥 今日新信号", ""]
+    for level in ("S", "A", "B"):
+        for signal in grouped[level]:
+            lines.extend([labels[level], signal.symbol])
+            if signal.daily_dxdx:
+                lines.append("日线：DXDX")
+            if signal.h4_dxdx:
+                lines.append("4H：DXDX")
+            lines.extend(["趋势：蓝梯 > 黄梯", f"收盘价：${signal.close:.2f}", ""])
+    lines.extend([
+        f"一句话：今日扫描 {pool_count} 只美股，发现 S级 {len(grouped['S'])} 只、A级 {len(grouped['A'])} 只、B级 {len(grouped['B'])} 只。",
+        f"数据时间：{scan_time:%Y-%m-%d} 美股收盘后",
+        "仅供研究参考，不构成投资建议。",
+    ])
+    return subject, "\n".join(lines) + "\n"

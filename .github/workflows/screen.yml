@@ -1,66 +1,67 @@
-name: Stock Screener
+name: US Dual-Timeframe DXDX Pullback Radar
 
 on:
   schedule:
-    - cron: "*/30 13-21 * * 1-5"
+    # Weekdays, after the US regular session and Yahoo finalisation window.
+    - cron: "30 22 * * 1-5"
   workflow_dispatch:
     inputs:
       test_email:
-        description: "Only send a test email"
+        description: Send Gmail SMTP connectivity test only
         required: false
         type: boolean
         default: false
+
+permissions:
+  contents: read
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
-
-      - name: Install deps
+      - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Restore alert state
         if: github.event.inputs.test_email != 'true'
         uses: actions/cache/restore@v4
         with:
           path: alert_state.json
-          key: alert-state-${{ github.run_id }}
+          key: dxdx-alert-state-${{ github.run_id }}
           restore-keys: |
-            alert-state-
-
-      - name: Run screener
+            dxdx-alert-state-
+      - name: Scan US stocks or test Gmail
         env:
-          SMTP_HOST: smtp.qq.com
-          SMTP_PORT: "465"
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          EMAIL_FROM: ${{ secrets.SMTP_USER }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           STRICT_BLUE_ABOVE: "false"
-          # Kept at 1 for clarity. screener.py now enforces latest closed bar only.
-          DAILY_LOOKBACK_BARS: "1"
-          H4_LOOKBACK_BARS: "1"
-          MAX_WORKERS: "3"
+          MAX_WORKERS: "6"
         run: |
           if [ "${{ github.event.inputs.test_email }}" = "true" ]; then
             python main.py --test-email
           else
-            python main.py --once
+            python main.py
           fi
-
       - name: Save alert state
         if: always() && github.event.inputs.test_email != 'true' && hashFiles('alert_state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: alert_state.json
-          key: alert-state-${{ github.run_id }}
+          key: dxdx-alert-state-${{ github.run_id }}
+      - name: Upload DXDX artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxdx-pullback-radar
+          path: |
+            output/dxdx_signals.csv
+            output/dxdx_report.txt
+          if-no-files-found: warn

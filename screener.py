@@ -1,255 +1,173 @@
-"""Strict multi-timeframe screener.
+"""Independent daily/4H DXDX pullback scanner.
 
-A symbol is a hit only when the latest fully closed candle satisfies either:
-  - Daily: DXDX (抄底首现) AND blue > yellow
-  - 4H:    DXDX (抄底首现) AND blue > yellow
-
-Older signals, lower-timeframe signals, and still-forming candles never trigger.
+This module intentionally does not rank RSI, sectors, momentum, or watchlists.
+It keeps the original DXDX formula and EMA23/EMA89 trend filter.
 """
 from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from data_fetcher import fetch_daily, fetch_4h
+from data_fetcher import fetch_4h, fetch_daily
 from indicators import add_all_indicators
+from universe import is_us_listed_stock
 
 log = logging.getLogger(__name__)
-
 NEW_YORK = ZoneInfo("America/New_York")
 CLOSE_GRACE = pd.Timedelta(minutes=20)
 
 
 @dataclass
-class Hit:
+class Signal:
     symbol: str
-    daily_signal_at: datetime | None
-    h4_signal_at: datetime | None
-    daily_close: float
-    daily_dif: float | None
-    h4_dif: float | None
-    blue_strict_daily: bool | None
-    blue_strict_h4: bool | None
+    signal_level: str
+    daily_dxdx: bool
+    h4_dxdx: bool
+    daily_signal_time: datetime | None
+    h4_signal_time: datetime | None
+    close: float
+    blue_above_yellow: bool
     detected_at: datetime
 
-    def to_text(self) -> str:
-        daily = f"{self.daily_signal_at:%Y-%m-%d}" if self.daily_signal_at else "-"
-        h4 = f"{self.h4_signal_at:%Y-%m-%d %H:%M}" if self.h4_signal_at else "-"
-        return (
-            f"{self.symbol:6s}  ${self.daily_close:>8.2f}  "
-            f"日 {daily}  "
-            f"4H {h4}"
-        )
+    def signal_keys(self) -> list[tuple[str, datetime]]:
+        keys: list[tuple[str, datetime]] = []
+        if self.daily_dxdx and self.daily_signal_time:
+            keys.append(("daily", self.daily_signal_time))
+        if self.h4_dxdx and self.h4_signal_time:
+            keys.append(("4h", self.h4_signal_time))
+        return keys
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        for key in ("daily_signal_at", "h4_signal_at", "detected_at"):
-            d[key] = d[key].isoformat() if d[key] else None
-        return d
+        result = asdict(self)
+        for key in ("daily_signal_time", "h4_signal_time", "detected_at"):
+            result[key] = result[key].isoformat() if result[key] else ""
+        return result
+
+
+@dataclass
+class ScanStats:
+    pool_count: int
+    fetched_count: int = 0
+    failed_count: int = 0
 
 
 def _as_new_york_time(now: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
-    ts = pd.Timestamp(now if now is not None else datetime.now(tz=NEW_YORK))
-    if ts.tzinfo is None:
-        return ts.tz_localize(NEW_YORK)
-    return ts.tz_convert(NEW_YORK)
+    timestamp = pd.Timestamp(now if now is not None else datetime.now(tz=NEW_YORK))
+    return timestamp.tz_localize(NEW_YORK) if timestamp.tzinfo is None else timestamp.tz_convert(NEW_YORK)
 
 
-def _latest_closed_position(
-    df: pd.DataFrame,
-    timeframe: str,
-    now: datetime | pd.Timestamp | None = None,
-) -> int | None:
-    """Return the position of the latest fully closed candle.
-
-    A 20-minute grace period avoids selecting Yahoo bars that are still being
-    finalized. The first 4H bar closes at 13:30 ET and the second at 16:00 ET.
-    """
+def _closed_positions(df: pd.DataFrame, timeframe: str, now: datetime | pd.Timestamp | None = None) -> list[int]:
+    """Return positions of complete US-session bars only."""
     if df.empty:
-        return None
-
+        return []
     now_et = _as_new_york_time(now)
-    idx = pd.DatetimeIndex(df.index)
-    if idx.tz is None:
-        idx_et = idx.tz_localize(NEW_YORK)
-    else:
-        idx_et = idx.tz_convert(NEW_YORK)
-
-    session_close = idx_et.normalize() + pd.Timedelta(hours=16) + CLOSE_GRACE
-
+    index = pd.DatetimeIndex(df.index)
+    index_et = index.tz_localize(NEW_YORK) if index.tz is None else index.tz_convert(NEW_YORK)
+    session_close = index_et.normalize() + pd.Timedelta(hours=16) + CLOSE_GRACE
     if timeframe == "daily":
-        closed_at = session_close
+        closes_at = session_close
     elif timeframe == "4h":
-        label_close = idx_et + CLOSE_GRACE
-        closed_at = pd.DatetimeIndex(
-            [
-                min(label_time, market_close)
-                for label_time, market_close in zip(label_close, session_close)
-            ]
-        )
+        closes_at = pd.DatetimeIndex([min(label + CLOSE_GRACE, close) for label, close in zip(index_et, session_close)])
     else:
         raise ValueError(f"Unsupported timeframe: {timeframe}")
-
-    positions = [i for i, is_closed in enumerate(closed_at <= now_et) if bool(is_closed)]
-    return positions[-1] if positions else None
+    return [position for position, closed in enumerate(closes_at <= now_et) if bool(closed)]
 
 
-def _latest_closed_row(
-    df: pd.DataFrame,
-    timeframe: str,
-    now: datetime | pd.Timestamp | None = None,
-) -> tuple[pd.Timestamp, pd.Series] | None:
-    pos = _latest_closed_position(df, timeframe, now)
-    if pos is None:
+def latest_complete_daily(df: pd.DataFrame, now: datetime | pd.Timestamp | None = None) -> tuple[pd.Timestamp, pd.Series] | None:
+    positions = _closed_positions(df, "daily", now)
+    if not positions:
         return None
-    return pd.Timestamp(df.index[pos]), df.iloc[pos]
+    position = positions[-1]
+    return pd.Timestamp(df.index[position]), df.iloc[position]
 
 
-def _is_true(value) -> bool:
-    return False if pd.isna(value) else bool(value)
+def current_day_h4_dxdx(df: pd.DataFrame, now: datetime | pd.Timestamp | None = None) -> tuple[pd.Timestamp, pd.Series] | None:
+    """Find a DXDX on either of today's two latest complete 4H bars only."""
+    positions = _closed_positions(df, "4h", now)
+    if not positions or "DXDX" not in df.columns:
+        return None
+    now_et = _as_new_york_time(now).normalize()
+    candidates: list[int] = []
+    for position in positions:
+        timestamp = pd.Timestamp(df.index[position])
+        timestamp_et = timestamp.tz_localize(NEW_YORK) if timestamp.tzinfo is None else timestamp.tz_convert(NEW_YORK)
+        if timestamp_et.normalize() == now_et:
+            candidates.append(position)
+    # There are two 4H session bars; reverse prioritises the most recent one.
+    for position in reversed(candidates[-2:]):
+        row = df.iloc[position]
+        if bool(row.get("DXDX", False)):
+            return pd.Timestamp(df.index[position]), row
+    return None
 
 
-def _signal_on_latest_closed(
-    df: pd.DataFrame,
-    signal_col: str,
-    blue_col: str,
-    timeframe: str,
-    now: datetime | pd.Timestamp | None = None,
-) -> tuple[pd.Timestamp | None, pd.Series | None]:
-    """Check only the latest closed candle; never search older candles."""
-    if df.empty or signal_col not in df.columns or blue_col not in df.columns:
-        return None, None
-
-    latest = _latest_closed_row(df, timeframe, now)
-    if latest is None:
-        return None, None
-
-    ts, row = latest
-    if _is_true(row[signal_col]) and _is_true(row[blue_col]):
-        return ts, row
-    return None, row
+def _trend_is_bullish(daily_row: pd.Series, strict: bool) -> bool:
+    column = "BLUE_FULLY_ABOVE_YELLOW" if strict else "BLUE_ABOVE_YELLOW"
+    return bool(daily_row.get(column, False))
 
 
-def check_symbol(
-    symbol: str,
-    h4_lookback_bars: int | None = None,
-    daily_lookback_bars: int | None = None,
-    require_strict_separation: bool = False,
-    now: datetime | pd.Timestamp | None = None,
-) -> Hit | None:
-    """Run the strict latest-closed-candle check on one symbol.
-
-    The lookback arguments remain only for compatibility with older callers.
-    They are ignored: an older DXDX is never allowed to trigger a push.
-    """
-    del h4_lookback_bars, daily_lookback_bars
-
-    df_d = pd.DataFrame()
-    df_h = pd.DataFrame()
-
+def check_symbol(symbol: str, *, require_strict_separation: bool = False, now: datetime | pd.Timestamp | None = None) -> Signal | None:
+    """Classify one US stock: S daily+4H, A 4H, B daily."""
+    if not is_us_listed_stock(symbol):
+        return None
     try:
-        daily = fetch_daily(symbol, period="3y")
-        if len(daily) >= 120:
-            df_d = add_all_indicators(daily)
+        daily = add_all_indicators(fetch_daily(symbol, period="3y"))
+        h4 = add_all_indicators(fetch_4h(symbol, period="730d"))
     except Exception as exc:
-        log.warning(f"{symbol}: daily data error - {exc}")
+        log.warning("%s data error: %s", symbol, exc)
+        raise
+    if len(daily) < 120 or len(h4) < 120:
+        raise ValueError("insufficient daily or 4H history")
 
-    try:
-        h4 = fetch_4h(symbol, period="730d")
-        if len(h4) >= 120:
-            df_h = add_all_indicators(h4)
-    except Exception as exc:
-        log.warning(f"{symbol}: 4H data error - {exc}")
-
-    if df_d.empty and df_h.empty:
+    daily_latest = latest_complete_daily(daily, now)
+    if daily_latest is None:
+        return None
+    daily_time, daily_row = daily_latest
+    bullish = _trend_is_bullish(daily_row, require_strict_separation)
+    if not bullish:
         return None
 
-    blue_col = (
-        "BLUE_FULLY_ABOVE_YELLOW"
-        if require_strict_separation
-        else "BLUE_ABOVE_YELLOW"
-    )
-
-    # Only the newest fully closed daily or 4H candle is eligible.
-    # DXDX and blue>yellow must both be true on that same timeframe/bar.
-    daily_ts, daily_latest = _signal_on_latest_closed(
-        df_d, "DXDX", blue_col, "daily", now
-    )
-    h4_ts, h4_latest = _signal_on_latest_closed(
-        df_h, "DXDX", blue_col, "4h", now
-    )
-
-    if daily_ts is None and h4_ts is None:
+    daily_dxdx = bool(daily_row.get("DXDX", False))
+    h4_match = current_day_h4_dxdx(h4, now)
+    h4_dxdx = h4_match is not None
+    if not daily_dxdx and not h4_dxdx:
         return None
 
-    daily_signal_row = df_d.loc[daily_ts] if daily_ts is not None else None
-    h4_signal_row = df_h.loc[h4_ts] if h4_ts is not None else None
-
-    price_row = daily_latest if daily_latest is not None else h4_latest
-    if price_row is None:
-        return None
-
-    detected = _as_new_york_time(now).to_pydatetime()
-
-    return Hit(
+    level = "S" if daily_dxdx and h4_dxdx else ("A" if h4_dxdx else "B")
+    h4_time = h4_match[0].to_pydatetime() if h4_match else None
+    return Signal(
         symbol=symbol,
-        daily_signal_at=daily_ts.to_pydatetime() if daily_ts is not None else None,
-        h4_signal_at=h4_ts.to_pydatetime() if h4_ts is not None else None,
-        daily_close=float(price_row["close"]),
-        daily_dif=float(daily_signal_row["DIF"]) if daily_signal_row is not None else None,
-        h4_dif=float(h4_signal_row["DIF"]) if h4_signal_row is not None else None,
-        blue_strict_daily=(
-            _is_true(daily_signal_row["BLUE_FULLY_ABOVE_YELLOW"])
-            if daily_signal_row is not None
-            else None
-        ),
-        blue_strict_h4=(
-            _is_true(h4_signal_row["BLUE_FULLY_ABOVE_YELLOW"])
-            if h4_signal_row is not None
-            else None
-        ),
-        detected_at=detected,
+        signal_level=level,
+        daily_dxdx=daily_dxdx,
+        h4_dxdx=h4_dxdx,
+        daily_signal_time=daily_time.to_pydatetime() if daily_dxdx else None,
+        h4_signal_time=h4_time,
+        close=float(daily_row["close"]),
+        blue_above_yellow=True,
+        detected_at=_as_new_york_time(now).to_pydatetime(),
     )
 
 
-def run_screener(
-    symbols: list[str],
-    h4_lookback_bars: int | None = None,
-    daily_lookback_bars: int | None = None,
-    require_strict_separation: bool = False,
-    max_workers: int = 8,
-) -> list[Hit]:
-    """Scan symbols in parallel and return strict latest-closed-bar hits."""
-    hits: list[Hit] = []
-    total = len(symbols)
-    done = 0
-
+def run_screener(symbols: list[str], *, require_strict_separation: bool = False, max_workers: int = 6, now: datetime | pd.Timestamp | None = None) -> tuple[list[Signal], ScanStats]:
+    allowed = [symbol for symbol in symbols if is_us_listed_stock(symbol)]
+    stats = ScanStats(pool_count=len(allowed))
+    signals: list[Signal] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                check_symbol,
-                symbol,
-                h4_lookback_bars,
-                daily_lookback_bars,
-                require_strict_separation,
-            ): symbol
-            for symbol in symbols
-        }
+        futures = {executor.submit(check_symbol, symbol, require_strict_separation=require_strict_separation, now=now): symbol for symbol in allowed}
         for future in as_completed(futures):
-            done += 1
             symbol = futures[future]
             try:
                 result = future.result()
-                if result is not None:
-                    log.info(f"HIT  [{done}/{total}] {result.to_text()}")
-                    hits.append(result)
-                elif done % 50 == 0:
-                    log.info(f"... progress {done}/{total}")
+                stats.fetched_count += 1
+                if result:
+                    signals.append(result)
             except Exception as exc:
-                log.warning(f"{symbol}: {exc}")
-    return hits
+                stats.failed_count += 1
+                log.warning("%s skipped: %s", symbol, exc)
+    priority = {"S": 0, "A": 1, "B": 2}
+    return sorted(signals, key=lambda item: (priority[item.signal_level], item.symbol)), stats
