@@ -1,0 +1,68 @@
+name: US Weekly Monthly DXDX Pullback Radar
+
+on:
+  schedule:
+    # Weekdays, after the US regular session and Yahoo finalisation window.
+    - cron: "10 23 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Scan and create artifacts without email or state updates
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Restore long alert state
+        if: github.event.inputs.dry_run != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: long_alert_state.json
+          key: long-dxdx-alert-state-${{ github.run_id }}
+          restore-keys: |
+            long-dxdx-alert-state-
+      - name: Scan US weekly/monthly DXDX
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          MAX_WORKERS: "6"
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            python long_main.py --dry-run
+          else
+            python long_main.py
+          fi
+      - name: Save long alert state
+        if: always() && github.event.inputs.dry_run != 'true' && hashFiles('long_alert_state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: long_alert_state.json
+          key: long-dxdx-alert-state-${{ github.run_id }}
+      - name: Upload long DXDX artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: long-dxdx-pullback-radar
+          path: |
+            output/long_dxdx_signals.csv
+            output/long_dxdx_report.txt
+          if-no-files-found: warn

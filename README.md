@@ -53,4 +53,24 @@ python main.py --dry-run
 
 可使用 `python main.py --test-email` 单独测试 Gmail 通道。
 
+## 周线 / 月线大周期雷达
+
+`long_main.py` 是与上述日线 + 4H 雷达完全独立的周/月 DXDX 扫描器。它仍扫描同一份 S&P 500 + Nasdaq-100 美股普通股/美国 ADR 股票池，但从 `fetch_daily(period="max")` 获取日线后，在美东时区自行重采样为 Friday-labelled 周 K 和自然月月 K；不依赖 Yahoo 的未完成周/月 K。
+
+- 周线仅在周五 16:20 ET 后使用当周 K；其他时间只检查上一根完整周 K。
+- 月线仅使用已结束并经下一个交易日收盘确认的自然月 K，绝不使用正在形成的当月 K。
+- 周/月仅判断原版 DXDX MACD 底背离，**不附加**日线蓝梯 > 黄梯过滤。
+- `long_alert_state.json` 使用 `SYMBOL|TIMEFRAME|SIGNAL_BAR_TIMESTAMP` 键并保留 400 天，因此同一股票的周线和月线信号分别去重。
+
+工作流 `.github/workflows/long_screen.yml` 名为 **US Weekly Monthly DXDX Pullback Radar**，在 UTC 23:10 的每个工作日运行，也可通过 `workflow_dispatch` 选择 dry run。它会上传：
+
+- `output/long_dxdx_signals.csv`
+- `output/long_dxdx_report.txt`
+
+本地 dry run：
+
+```bash
+python long_main.py --dry-run
+```
+
 仅供研究参考，不构成投资建议。

@@ -120,5 +120,39 @@ def resample_to_4h(hourly: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["close"])
 
 
+def _resample_ohlcv(daily: pd.DataFrame, frequency: str) -> pd.DataFrame:
+    """Aggregate daily US bars using New York calendar boundaries.
+
+    This intentionally works from daily data instead of Yahoo's partially
+    formed ``1wk``/``1mo`` downloads.  The resulting labels are midnight in
+    America/New_York on the Friday/month-end that owns each aggregate bar.
+    Completion is decided by the long-timeframe scanner, not here.
+    """
+    if daily.empty:
+        return daily
+
+    work = _as_new_york_index(daily).sort_index()
+    required = ["open", "high", "low", "close", "volume"]
+    if any(column not in work.columns for column in required):
+        return pd.DataFrame(columns=required)
+    return work[required].resample(frequency).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }).dropna(subset=["open", "high", "low", "close"])
+
+
+def resample_to_weekly(daily: pd.DataFrame) -> pd.DataFrame:
+    """Build Friday-labelled weekly OHLCV bars from daily data in ET."""
+    return _resample_ohlcv(daily, "W-FRI")
+
+
+def resample_to_monthly(daily: pd.DataFrame) -> pd.DataFrame:
+    """Build natural calendar-month OHLCV bars from daily data in ET."""
+    return _resample_ohlcv(daily, "ME")
+
+
 def fetch_4h(symbol: str, period: str = "730d") -> pd.DataFrame:
     return resample_to_4h(fetch_hourly(symbol, period))

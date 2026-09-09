@@ -63,3 +63,29 @@ def format_signals_email(signals: list, *, pool_count: int, scan_time: datetime 
         "仅供研究参考，不构成投资建议。",
     ])
     return subject, "\n".join(lines) + "\n"
+
+
+def format_long_signals_email(signals: list, *, pool_count: int, scan_time: datetime | None = None) -> tuple[str, str]:
+    """Format independent weekly/monthly DXDX alerts without trend filtering."""
+    scan_time = scan_time or datetime.now()
+    monthly = [signal for signal in signals if signal.timeframe == "monthly"]
+    weekly = [signal for signal in signals if signal.timeframe == "weekly"]
+    subject = f"【美股周/月抄底雷达】月{len(monthly)} 周{len(weekly)}｜{scan_time:%Y-%m-%d}"
+    lines = ["【美股周/月抄底雷达】", "", "🔥 新的大周期抄底信号", ""]
+    for label, items, timeframe_label in (("🟣 月线抄底", monthly, "月线"), ("🟠 周线抄底", weekly, "周线")):
+        for signal in items:
+            lines.extend([
+                label,
+                signal.symbol,
+                f"{timeframe_label}：DXDX",
+                f"信号K：{signal.signal_time:%Y-%m-%d}",
+                f"信号收盘价：${signal.close:.2f}",
+                "",
+            ])
+    lines.extend([
+        "规则说明：DXDX 大周期底背离，不附加日线蓝梯 > 黄梯过滤。",
+        f"本次扫描 {pool_count} 只美股。",
+        f"月线信号 {len(monthly)} 个，周线信号 {len(weekly)} 个。",
+        "仅供研究参考，不构成投资建议。",
+    ])
+    return subject, "\n".join(lines) + "\n"
