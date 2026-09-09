@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import types
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ import pandas as pd
 import long_main
 import long_screener
 import notifier
+from data_fetcher import fetch_daily, resample_to_4h, resample_to_monthly, resample_to_weekly
 from long_screener import LongScanStats, LongSignal
 from state import AlertState
 
@@ -45,7 +47,88 @@ def long_signal(symbol: str = "META", timeframe: str = "weekly", when: datetime 
     return LongSignal(symbol, timeframe, when, 123.45, TUESDAY)
 
 
+def ohlcv(index: pd.DatetimeIndex, *, high: float = 101.0, low: float = 99.0, close: float = 100.0, volume: float = 100.0) -> pd.DataFrame:
+    return pd.DataFrame({"open": 100.0, "high": high, "low": low, "close": close, "volume": volume}, index=index)
+
+
 class LongTimeframeRadarTests(unittest.TestCase):
+    def test_fetch_daily_requests_prepost_false_and_rejects_intraday_extended_row(self):
+        calls: dict = {}
+        daily_index = pd.DatetimeIndex([
+            pd.Timestamp("2026-09-08", tz=ET),
+            pd.Timestamp("2026-09-08 20:00", tz=ET),
+        ])
+
+        class FakeTicker:
+            def __init__(self, symbol):
+                self.symbol = symbol
+
+            def history(self, **kwargs):
+                calls.update(kwargs)
+                return ohlcv(daily_index, high=101.0)
+
+        with patch.dict("sys.modules", {"yfinance": types.SimpleNamespace(Ticker=FakeTicker)}):
+            result = fetch_daily("META", period="max")
+        self.assertFalse(calls["prepost"])
+        self.assertEqual(calls["interval"], "1d")
+        self.assertEqual(len(result), 1)
+
+    def test_premarket_and_afterhours_do_not_enter_4h(self):
+        rth = pd.date_range("2026-09-08 09:30", periods=7, freq="h", tz=ET)
+        # 09:30 through 15:30 are valid 1H bar starts; 16:30 is after-hours.
+        frame = ohlcv(rth, high=110.0, low=90.0, volume=100.0)
+        extras = ohlcv(pd.DatetimeIndex([
+            pd.Timestamp("2026-09-08 08:30", tz=ET),
+            pd.Timestamp("2026-09-08 20:00", tz=ET),
+        ]), high=9_999.0, low=-999.0, volume=9_999.0)
+        result = resample_to_4h(pd.concat([frame, extras]).sort_index())
+        self.assertEqual(len(result), 2)
+        self.assertLess(result["high"].max(), 1_000.0)
+        self.assertGreater(result["low"].min(), 0.0)
+        self.assertEqual(result["volume"].sum(), 700.0)
+
+    def test_overnight_extremes_do_not_change_weekly_ohlcv(self):
+        rth = ohlcv(pd.DatetimeIndex([
+            pd.Timestamp("2026-09-01 09:30", tz=ET),
+            pd.Timestamp("2026-09-04 09:30", tz=ET),
+        ]), high=110.0, low=90.0, close=105.0, volume=100.0)
+        overnight = ohlcv(pd.DatetimeIndex([pd.Timestamp("2026-09-02 20:00", tz=ET)]), high=9_999.0, low=-999.0, close=1.0, volume=9_999.0)
+        weekly = resample_to_weekly(pd.concat([rth, overnight]).sort_index())
+        self.assertEqual(float(weekly.iloc[0]["high"]), 110.0)
+        self.assertEqual(float(weekly.iloc[0]["low"]), 90.0)
+        self.assertEqual(float(weekly.iloc[0]["volume"]), 200.0)
+
+    def test_overnight_extremes_do_not_change_monthly_ohlcv(self):
+        rth = ohlcv(pd.DatetimeIndex([
+            pd.Timestamp("2026-08-03 09:30", tz=ET),
+            pd.Timestamp("2026-08-28 09:30", tz=ET),
+        ]), high=110.0, low=90.0, close=105.0, volume=100.0)
+        overnight = ohlcv(pd.DatetimeIndex([pd.Timestamp("2026-08-28 20:00", tz=ET)]), high=9_999.0, low=-999.0, close=1.0, volume=9_999.0)
+        monthly = resample_to_monthly(pd.concat([rth, overnight]).sort_index())
+        self.assertEqual(float(monthly.iloc[0]["high"]), 110.0)
+        self.assertEqual(float(monthly.iloc[0]["low"]), 90.0)
+        self.assertEqual(float(monthly.iloc[0]["volume"]), 200.0)
+
+    def test_long_dxdx_input_is_rth_only(self):
+        dates = pd.date_range("2024-03-01", "2026-09-08", freq="B", tz=ET) + pd.Timedelta(hours=9, minutes=30)
+        daily = ohlcv(dates, high=101.0, low=99.0, close=100.0, volume=100.0)
+        overnight = ohlcv(pd.DatetimeIndex([pd.Timestamp("2026-09-08 20:00", tz=ET)]), high=9_999.0, low=-999.0, close=1.0, volume=9_999.0)
+        seen: list[pd.DataFrame] = []
+
+        def checked_dxdx(frame: pd.DataFrame) -> pd.DataFrame:
+            seen.append(frame.copy())
+            self.assertLess(frame["high"].max(), 1_000.0)
+            self.assertGreater(frame["low"].min(), 0.0)
+            out = frame.copy()
+            out["DXDX"] = out.index == pd.Timestamp("2026-09-04", tz=ET)
+            return out
+
+        with patch("long_screener.compute_macd_divergence", side_effect=checked_dxdx):
+            signals, insufficient = long_screener._signals_from_daily("META", pd.concat([daily, overnight]).sort_index(), TUESDAY)
+        self.assertFalse(insufficient)
+        self.assertTrue(seen)
+        self.assertEqual([signal.timeframe for signal in signals], ["weekly"])
+
     def test_tuesday_excludes_forming_week_but_allows_prior_week(self):
         frame = weekly_bars(final_dxdx=True, previous_dxdx=True)
         latest = long_screener.latest_complete_long_bar(frame, "weekly", TUESDAY)

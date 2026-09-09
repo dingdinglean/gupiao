@@ -53,8 +53,28 @@ def _regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
     return out.loc[in_session]
 
 
+def _daily_regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only confirmed RTH daily bars, defensively rejecting intraday extras.
+
+    Yahoo's ``interval=1d, prepost=False`` response is an official regular
+    session daily bar and is normally date-labelled at midnight ET.  Those
+    date labels must be retained; if an unexpected intraday row is supplied,
+    only a 09:30--16:00 ET row is accepted.  This makes weekly/monthly
+    aggregation safe even if a caller accidentally passes mixed data.
+    """
+    if df.empty:
+        return df
+
+    out = _as_new_york_index(df)
+    minutes = out.index.hour * 60 + out.index.minute
+    date_labelled = out.index == out.index.normalize()
+    in_session = (minutes >= MARKET_OPEN_MINUTE) & (minutes <= MARKET_CLOSE_MINUTE)
+    is_weekday = out.index.dayofweek < 5
+    return out.loc[is_weekday & (date_labelled | in_session)]
+
+
 def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:
-    """Daily bars without pre-market or after-hours data."""
+    """Confirmed US regular-session daily bars; no extended-hours data."""
     import yfinance as yf
     df = yf.Ticker(symbol).history(
         period=period,
@@ -62,7 +82,9 @@ def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:
         auto_adjust=True,
         prepost=False,
     )
-    return _normalize(df)
+    # ``prepost=False`` is the source-level RTH guarantee.  Keep the
+    # defensive daily filter as a second line of protection for every caller.
+    return _daily_regular_session_only(_normalize(df))
 
 
 def fetch_hourly(symbol: str, period: str = "730d") -> pd.DataFrame:
@@ -131,7 +153,10 @@ def _resample_ohlcv(daily: pd.DataFrame, frequency: str) -> pd.DataFrame:
     if daily.empty:
         return daily
 
-    work = _as_new_york_index(daily).sort_index()
+    # Weekly/monthly must never aggregate an untrusted extended-hours row.
+    # Daily data returned by fetch_daily is already RTH-only, and this second
+    # filter protects direct callers of the public resampling helpers too.
+    work = _daily_regular_session_only(daily).sort_index()
     required = ["open", "high", "low", "close", "volume"]
     if any(column not in work.columns for column in required):
         return pd.DataFrame(columns=required)
