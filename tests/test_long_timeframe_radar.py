@@ -128,6 +128,8 @@ class LongTimeframeRadarTests(unittest.TestCase):
         self.assertFalse(insufficient)
         self.assertTrue(seen)
         self.assertEqual([signal.timeframe for signal in signals], ["weekly"])
+        self.assertEqual(signals[0].push_date, "2026-09-08")
+        self.assertEqual(signals[0].push_price, 100.0)
 
     def test_tuesday_excludes_forming_week_but_allows_prior_week(self):
         frame = weekly_bars(final_dxdx=True, previous_dxdx=True)
@@ -210,6 +212,25 @@ class LongTimeframeRadarTests(unittest.TestCase):
             state_path = Path(directory) / "long.json"
             long_main.run_once({"max_workers": 1}, ["AMD"], AlertState(state_path, ttl_days=400), dry_run=True)
             self.assertFalse(state_path.exists())
+
+    def test_dry_run_artifact_keeps_all_detected_signals(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(long_main, "OUTPUT_DIR", Path(directory)), patch("long_main.run_long_screener", return_value=([long_signal("META", "weekly"), long_signal("INTC", "monthly")], LongScanStats(pool_count=2, fetched_count=2))):
+            state = AlertState(Path(directory) / "long.json", ttl_days=400)
+            long_main.run_once({"max_workers": 1}, ["META", "INTC"], state, dry_run=True)
+            with (Path(directory) / "long_dxdx_signals.csv").open(encoding="utf-8-sig") as handle:
+                rows = list(__import__("csv").DictReader(handle))
+            self.assertEqual({row["symbol"] for row in rows}, {"META", "INTC"})
+
+    def test_formal_artifact_contains_only_newly_emailed_signals(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(long_main, "OUTPUT_DIR", Path(directory)), patch("long_main.run_long_screener", return_value=([long_signal("META", "weekly"), long_signal("INTC", "monthly")], LongScanStats(pool_count=2, fetched_count=2))), patch("long_main.require_smtp_config"), patch("long_main.send_email") as sent:
+            state = AlertState(Path(directory) / "long.json", ttl_days=400)
+            state.mark_sent(long_signal("META", "weekly"))
+            config = {"max_workers": 1, "smtp_host": "smtp.example.test", "smtp_port": 587, "smtp_user": "sender@example.test", "smtp_password": "secret", "to_addrs": ["to@example.test"]}
+            long_main.run_once(config, ["META", "INTC"], state)
+            with (Path(directory) / "long_dxdx_signals.csv").open(encoding="utf-8-sig") as handle:
+                rows = list(__import__("csv").DictReader(handle))
+            self.assertEqual([row["symbol"] for row in rows], ["INTC"])
+            sent.assert_called_once()
 
     def test_long_email_contains_timeframes_ticker_signal_time_and_close(self):
         monthly = long_signal("INTC", "monthly", datetime(2026, 8, 31, 0, 0, tzinfo=ET))

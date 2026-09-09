@@ -71,6 +71,8 @@ python main.py --dry-run
 - `output/long_dxdx_signals.csv`
 - `output/long_dxdx_report.txt`
 
+正式邮件成功后的周/月 CSV 是推送事实记录：只含该封邮件实际发送的 `new_signals`，并同时记录 DXDX K 的 `signal_price`、实际邮件市场日 `push_date` 与当时最新完整 RTH 日K收盘 `push_price`。dry run 仍输出全部扫描结果供核验。
+
 本地 dry run：
 
 ```bash

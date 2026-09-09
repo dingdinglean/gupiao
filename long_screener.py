@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from data_fetcher import fetch_daily, resample_to_monthly, resample_to_weekly
+from data_fetcher import _daily_regular_session_only, fetch_daily, resample_to_monthly, resample_to_weekly
 from indicators import compute_macd_divergence
 from universe import is_us_listed_stock
 
@@ -31,6 +31,8 @@ class LongSignal:
     signal_time: datetime
     close: float
     detected_at: datetime
+    push_date: str = ""
+    push_price: float | None = None
 
     def signal_keys(self) -> list[tuple[str, datetime]]:
         return [(self.timeframe, self.signal_time)]
@@ -39,6 +41,8 @@ class LongSignal:
         result = asdict(self)
         result["signal_time"] = self.signal_time.isoformat()
         result["detected_at"] = self.detected_at.isoformat()
+        result["signal_price"] = self.close
+        result["push_price"] = "" if self.push_price is None else self.push_price
         return result
 
 
@@ -97,9 +101,30 @@ def latest_complete_long_bar(
     return pd.Timestamp(df.index[position]), df.iloc[position]
 
 
+def latest_complete_daily_close(daily: pd.DataFrame, now: datetime | pd.Timestamp | None = None) -> float | None:
+    """Return the latest fully closed RTH daily close available at alert time."""
+    daily = _daily_regular_session_only(daily)
+    if daily.empty or "close" not in daily.columns:
+        return None
+    now_et = _as_new_york_time(now)
+    index_et = _as_new_york_index(daily.index)
+    complete = [position for position, label in enumerate(index_et) if label.normalize() + pd.Timedelta(hours=16) + CLOSE_GRACE <= now_et]
+    if not complete:
+        return None
+    close = daily.iloc[complete[-1]].get("close")
+    try:
+        value = float(close)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _signals_from_daily(symbol: str, daily: pd.DataFrame, now: datetime | pd.Timestamp | None = None) -> tuple[list[LongSignal], bool]:
     """Produce weekly and/or monthly signals; histories are evaluated separately."""
-    detected_at = _as_new_york_time(now).to_pydatetime()
+    now_et = _as_new_york_time(now)
+    detected_at = now_et.to_pydatetime()
+    push_date = now_et.date().isoformat()
+    push_price = latest_complete_daily_close(daily, now_et)
     signals: list[LongSignal] = []
     weekly = resample_to_weekly(daily)
     monthly = resample_to_monthly(daily)
@@ -123,6 +148,8 @@ def _signals_from_daily(symbol: str, daily: pd.DataFrame, now: datetime | pd.Tim
                 signal_time=signal_time.to_pydatetime(),
                 close=float(row["close"]),
                 detected_at=detected_at,
+                push_date=push_date,
+                push_price=push_price,
             ))
     return signals, not enough_weekly and not enough_monthly
 

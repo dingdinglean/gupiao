@@ -52,7 +52,7 @@ def require_smtp_config(cfg: dict) -> None:
 
 def write_reports(signals: list[LongSignal], stats: LongScanStats, *, email_sent: bool, detected_at: datetime) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    fields = ["symbol", "timeframe", "signal_time", "close", "detected_at"]
+    fields = ["symbol", "timeframe", "signal_time", "close", "signal_price", "push_date", "push_price", "detected_at"]
     with (OUTPUT_DIR / "long_dxdx_signals.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -92,7 +92,10 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool 
     for signal in new_signals:
         state.mark_sent(signal)
     state.save()
-    write_reports(signals, stats, email_sent=True, detected_at=started)
+    # The formal artifact is a push-fact ledger: it must exactly match the
+    # rows that were successfully delivered in this email, never old signals
+    # that happened to still be visible on the latest completed bars.
+    write_reports(new_signals, stats, email_sent=True, detected_at=started)
     return signals, stats, True
 
 
