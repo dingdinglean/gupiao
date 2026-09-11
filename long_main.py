@@ -14,7 +14,7 @@ except ImportError:
     def load_dotenv() -> bool:
         return False
 
-from long_screener import LongScanStats, LongSignal, run_long_screener
+from long_screener import LongDiagnostic, LongScanStats, LongSignal, run_long_screener
 from notifier import format_long_signals_email, send_email
 from state import AlertState
 from universe import get_universe
@@ -50,13 +50,31 @@ def require_smtp_config(cfg: dict) -> None:
         raise RuntimeError("Missing required SMTP configuration: " + ", ".join(missing))
 
 
-def write_reports(signals: list[LongSignal], stats: LongScanStats, *, email_sent: bool, detected_at: datetime) -> None:
+def write_reports(
+    signals: list[LongSignal],
+    stats: LongScanStats,
+    *,
+    email_sent: bool,
+    detected_at: datetime,
+    diagnostics: list[LongDiagnostic] | None = None,
+) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     fields = ["symbol", "timeframe", "signal_time", "close", "signal_price", "push_date", "push_price", "detected_at"]
     with (OUTPUT_DIR / "long_dxdx_signals.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(signal.to_dict() for signal in signals)
+    diagnostic_fields = [
+        "symbol", "timeframe", "signal_time", "last_required_trading_date", "latest_daily_date",
+        "daily_context_source", "signal_close", "push_date", "push_price", "dxdx", "completeness_passed",
+    ]
+    with (OUTPUT_DIR / "long_dxdx_diagnostics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=diagnostic_fields)
+        writer.writeheader()
+        writer.writerows(
+            item.to_dict()
+            for item in sorted(diagnostics or [], key=lambda item: (item.timeframe, item.signal_time.isoformat() if item.signal_time else "", item.symbol))
+        )
     monthly_count = sum(signal.timeframe == "monthly" for signal in signals)
     weekly_count = sum(signal.timeframe == "weekly" for signal in signals)
     lines = [
@@ -65,6 +83,7 @@ def write_reports(signals: list[LongSignal], stats: LongScanStats, *, email_sent
         f"成功取数数量：{stats.fetched_count}",
         f"数据失败数量：{stats.failed_count}",
         f"历史不足数量：{stats.insufficient_count}",
+        f"周期完整性拒绝数量：{stats.freshness_rejected_count}",
         f"周线 DXDX 数量：{weekly_count}",
         f"月线 DXDX 数量：{monthly_count}",
         f"邮件是否发送：{'是' if email_sent else '否'}",
@@ -75,15 +94,16 @@ def write_reports(signals: list[LongSignal], stats: LongScanStats, *, email_sent
 
 def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool = False) -> tuple[list[LongSignal], LongScanStats, bool]:
     started = datetime.now()
-    signals, stats = run_long_screener(symbols, max_workers=cfg["max_workers"])
+    diagnostics: list[LongDiagnostic] = []
+    signals, stats = run_long_screener(symbols, max_workers=cfg["max_workers"], diagnostics=diagnostics)
     new_signals = state.filter_new(signals)
     if dry_run:
         log.info("Dry run: %s new weekly/monthly DXDX signal(s); email and state update skipped.", len(new_signals))
-        write_reports(signals, stats, email_sent=False, detected_at=started)
+        write_reports(signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
         return signals, stats, False
     if not new_signals:
         log.info("No new weekly/monthly DXDX signals; email skipped.")
-        write_reports(signals, stats, email_sent=False, detected_at=started)
+        write_reports(signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
         state.save()
         return signals, stats, False
     require_smtp_config(cfg)
@@ -95,7 +115,7 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool 
     # The formal artifact is a push-fact ledger: it must exactly match the
     # rows that were successfully delivered in this email, never old signals
     # that happened to still be visible on the latest completed bars.
-    write_reports(new_signals, stats, email_sent=True, detected_at=started)
+    write_reports(new_signals, stats, email_sent=True, detected_at=started, diagnostics=diagnostics)
     return signals, stats, True
 
 

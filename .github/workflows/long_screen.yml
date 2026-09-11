@@ -65,4 +65,5 @@ jobs:
           path: |
             output/long_dxdx_signals.csv
             output/long_dxdx_report.txt
+            output/long_dxdx_diagnostics.csv
           if-no-files-found: warn

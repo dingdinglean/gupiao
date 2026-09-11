@@ -13,7 +13,7 @@ import pandas as pd
 import long_main
 import long_screener
 import notifier
-from data_fetcher import fetch_daily, resample_to_4h, resample_to_monthly, resample_to_weekly
+from data_fetcher import fetch_daily, resample_to_4h, resample_to_monthly, resample_to_weekly, rth_hourly_to_daily
 from long_screener import LongScanStats, LongSignal
 from state import AlertState
 
@@ -51,6 +51,25 @@ def ohlcv(index: pd.DatetimeIndex, *, high: float = 101.0, low: float = 99.0, cl
     return pd.DataFrame({"open": 100.0, "high": high, "low": low, "close": close, "volume": volume}, index=index)
 
 
+def current_rth_daily(*, close: float = 100.0) -> pd.DataFrame:
+    return ohlcv(pd.DatetimeIndex([pd.Timestamp(TUESDAY.date(), tz=ET)]), close=close)
+
+
+def daily_history_through(day: str, *, close: float = 100.0) -> pd.DataFrame:
+    index = pd.date_range(end=pd.Timestamp(day, tz=ET), periods=700, freq="B")
+    return ohlcv(index, close=close, volume=100.0)
+
+
+def complete_rth_hourly(day: str, *, close: float = 101.0) -> pd.DataFrame:
+    rth = pd.date_range(f"{day} 09:30", periods=7, freq="h", tz=ET)
+    frame = ohlcv(rth, high=102.0, low=98.0, close=close, volume=100.0)
+    extras = ohlcv(pd.DatetimeIndex([
+        pd.Timestamp(f"{day} 08:30", tz=ET),
+        pd.Timestamp(f"{day} 16:30", tz=ET),
+    ]), high=9_999.0, low=-999.0, close=1.0, volume=9_999.0)
+    return pd.concat([frame, extras]).sort_index()
+
+
 class LongTimeframeRadarTests(unittest.TestCase):
     def test_fetch_daily_requests_prepost_false_and_rejects_intraday_extended_row(self):
         calls: dict = {}
@@ -86,6 +105,16 @@ class LongTimeframeRadarTests(unittest.TestCase):
         self.assertLess(result["high"].max(), 1_000.0)
         self.assertGreater(result["low"].min(), 0.0)
         self.assertEqual(result["volume"].sum(), 700.0)
+
+    def test_long_fallback_daily_excludes_premarket_afterhours_and_overnight(self):
+        daily = rth_hourly_to_daily(
+            complete_rth_hourly("2026-09-11", close=101.25),
+            pd.Timestamp("2026-09-11", tz=ET),
+            now=pd.Timestamp("2026-09-11 16:20", tz=ET),
+        )
+        self.assertEqual(float(daily.iloc[0]["high"]), 102.0)
+        self.assertEqual(float(daily.iloc[0]["low"]), 98.0)
+        self.assertEqual(float(daily.iloc[0]["volume"]), 700.0)
 
     def test_overnight_extremes_do_not_change_weekly_ohlcv(self):
         rth = ohlcv(pd.DatetimeIndex([
@@ -144,6 +173,92 @@ class LongTimeframeRadarTests(unittest.TestCase):
         self.assertEqual(latest[0].date().isoformat(), "2026-09-11")
         self.assertTrue(latest[1]["DXDX"])
 
+    def test_friday_stale_daily_rejects_weekly_bar_even_with_friday_label(self):
+        now = datetime(2026, 9, 11, 16, 20, tzinfo=ET)
+        diagnostics: list = []
+        weekly = weekly_bars(final_dxdx=True)
+        monthly = monthly_bars()
+        with patch("long_screener.resample_to_weekly", return_value=weekly), patch("long_screener.resample_to_monthly", return_value=monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, _ = long_screener._signals_from_daily(
+                "META", daily_history_through("2026-09-10"), now,
+                hourly_provider=lambda: pd.DataFrame(), diagnostics=diagnostics,
+            )
+        weekly_diagnostic = next(item for item in diagnostics if item.timeframe == "weekly")
+        self.assertEqual(signals, [])
+        self.assertFalse(weekly_diagnostic.completeness_passed)
+        self.assertEqual(weekly_diagnostic.daily_context_source, "stale_rejected")
+
+    def test_friday_complete_rth_hourly_fallback_rebuilds_weekly_and_push_price(self):
+        now = datetime(2026, 9, 11, 16, 20, tzinfo=ET)
+        diagnostics: list = []
+        weekly = weekly_bars(final_dxdx=True)
+        monthly = monthly_bars()
+        with patch("long_screener.resample_to_weekly", return_value=weekly) as weekly_resample, patch("long_screener.resample_to_monthly", return_value=monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, _ = long_screener._signals_from_daily(
+                "META", daily_history_through("2026-09-10"), now,
+                hourly_provider=lambda: complete_rth_hourly("2026-09-11", close=101.25), diagnostics=diagnostics,
+            )
+        weekly_diagnostic = next(item for item in diagnostics if item.timeframe == "weekly")
+        self.assertEqual([item.timeframe for item in signals], ["weekly"])
+        self.assertEqual(weekly_diagnostic.daily_context_source, "rth_hourly_fallback")
+        self.assertTrue(weekly_diagnostic.completeness_passed)
+        self.assertGreaterEqual(weekly_resample.call_count, 2)
+        self.assertEqual(signals[0].push_date, "2026-09-11")
+        self.assertEqual(signals[0].push_price, 101.25)
+
+    def test_friday_incomplete_hourly_rejects_weekly_fallback(self):
+        now = datetime(2026, 9, 11, 16, 20, tzinfo=ET)
+        diagnostics: list = []
+        hourly = complete_rth_hourly("2026-09-11").drop(pd.Timestamp("2026-09-11 15:30", tz=ET))
+        with patch("long_screener.resample_to_weekly", return_value=weekly_bars(final_dxdx=True)), patch("long_screener.resample_to_monthly", return_value=monthly_bars()), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, _ = long_screener._signals_from_daily(
+                "META", daily_history_through("2026-09-10"), now,
+                hourly_provider=lambda: hourly, diagnostics=diagnostics,
+            )
+        weekly_diagnostic = next(item for item in diagnostics if item.timeframe == "weekly")
+        self.assertEqual(signals, [])
+        self.assertEqual(weekly_diagnostic.daily_context_source, "stale_rejected")
+
+    def test_month_end_missing_daily_rejects_monthly_bar(self):
+        now = datetime(2026, 9, 1, 16, 20, tzinfo=ET)
+        daily = pd.concat([daily_history_through("2026-08-28"), current_rth_daily(close=150.0).rename(index={pd.Timestamp(TUESDAY.date(), tz=ET): pd.Timestamp("2026-09-01", tz=ET)})]).sort_index()
+        diagnostics: list = []
+        with patch("long_screener.resample_to_weekly", return_value=weekly_bars()), patch("long_screener.resample_to_monthly", return_value=monthly_bars(previous_dxdx=True)), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, _ = long_screener._signals_from_daily("INTC", daily, now, hourly_provider=lambda: pd.DataFrame(), diagnostics=diagnostics)
+        monthly_diagnostic = next(item for item in diagnostics if item.timeframe == "monthly")
+        self.assertEqual(signals, [])
+        self.assertFalse(monthly_diagnostic.completeness_passed)
+        self.assertEqual(monthly_diagnostic.last_required_trading_date.date().isoformat(), "2026-08-31")
+
+    def test_month_end_rth_hourly_fallback_rebuilds_monthly_and_uses_push_day_close(self):
+        now = datetime(2026, 9, 1, 16, 20, tzinfo=ET)
+        september_push = ohlcv(pd.DatetimeIndex([pd.Timestamp("2026-09-01", tz=ET)]), close=150.0, volume=100.0)
+        daily = pd.concat([daily_history_through("2026-08-28"), september_push]).sort_index()
+        diagnostics: list = []
+        with patch("long_screener.resample_to_weekly", return_value=weekly_bars()), patch("long_screener.resample_to_monthly", return_value=monthly_bars(previous_dxdx=True)) as monthly_resample, patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, _ = long_screener._signals_from_daily(
+                "INTC", daily, now,
+                hourly_provider=lambda: complete_rth_hourly("2026-08-31", close=101.25), diagnostics=diagnostics,
+            )
+        monthly_diagnostic = next(item for item in diagnostics if item.timeframe == "monthly")
+        self.assertEqual([item.timeframe for item in signals], ["monthly"])
+        self.assertEqual(monthly_diagnostic.daily_context_source, "rth_hourly_fallback")
+        self.assertGreaterEqual(monthly_resample.call_count, 2)
+        self.assertEqual(signals[0].push_date, "2026-09-01")
+        self.assertEqual(signals[0].push_price, 150.0)
+
+    def test_month_end_incomplete_hourly_rejects_monthly_fallback(self):
+        now = datetime(2026, 9, 1, 16, 20, tzinfo=ET)
+        september_push = ohlcv(pd.DatetimeIndex([pd.Timestamp("2026-09-01", tz=ET)]), close=150.0, volume=100.0)
+        daily = pd.concat([daily_history_through("2026-08-28"), september_push]).sort_index()
+        diagnostics: list = []
+        hourly = complete_rth_hourly("2026-08-31").drop(pd.Timestamp("2026-08-31 15:30", tz=ET))
+        with patch("long_screener.resample_to_weekly", return_value=weekly_bars()), patch("long_screener.resample_to_monthly", return_value=monthly_bars(previous_dxdx=True)), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, _ = long_screener._signals_from_daily("INTC", daily, now, hourly_provider=lambda: hourly, diagnostics=diagnostics)
+        monthly_diagnostic = next(item for item in diagnostics if item.timeframe == "monthly")
+        self.assertEqual(signals, [])
+        self.assertEqual(monthly_diagnostic.daily_context_source, "stale_rejected")
+
     def test_forming_month_is_excluded_but_previous_month_is_allowed(self):
         frame = monthly_bars(final_dxdx=True, previous_dxdx=True)
         latest = long_screener.latest_complete_long_bar(frame, "monthly", TUESDAY)
@@ -153,21 +268,21 @@ class LongTimeframeRadarTests(unittest.TestCase):
     def test_weekly_dxdx_creates_weekly_signal_without_blue_yellow_filter(self):
         weekly = weekly_bars(previous_dxdx=True)
         monthly = monthly_bars()
-        with patch("long_screener.fetch_daily", return_value=pd.DataFrame({"close": [1]})), patch("long_screener.resample_to_weekly", return_value=weekly), patch("long_screener.resample_to_monthly", return_value=monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+        with patch("long_screener.fetch_daily", return_value=daily_history_through("2026-09-08")), patch("long_screener.resample_to_weekly", return_value=weekly), patch("long_screener.resample_to_monthly", return_value=monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
             signals = long_screener.check_symbol("META", now=TUESDAY)
         self.assertEqual([(item.symbol, item.timeframe) for item in signals], [("META", "weekly")])
 
     def test_monthly_dxdx_creates_monthly_signal(self):
         weekly = weekly_bars()
         monthly = monthly_bars(previous_dxdx=True)
-        with patch("long_screener.fetch_daily", return_value=pd.DataFrame({"close": [1]})), patch("long_screener.resample_to_weekly", return_value=weekly), patch("long_screener.resample_to_monthly", return_value=monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+        with patch("long_screener.fetch_daily", return_value=daily_history_through("2026-09-08")), patch("long_screener.resample_to_weekly", return_value=weekly), patch("long_screener.resample_to_monthly", return_value=monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
             signals = long_screener.check_symbol("INTC", now=TUESDAY)
         self.assertEqual([(item.symbol, item.timeframe) for item in signals], [("INTC", "monthly")])
 
     def test_insufficient_monthly_history_does_not_block_weekly_scan(self):
         weekly = weekly_bars(previous_dxdx=True)
         short_monthly = bars(pd.date_range(end="2026-09-30", periods=119, freq="ME", tz=ET))
-        with patch("long_screener.fetch_daily", return_value=pd.DataFrame({"close": [1]})), patch("long_screener.resample_to_weekly", return_value=weekly), patch("long_screener.resample_to_monthly", return_value=short_monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+        with patch("long_screener.fetch_daily", return_value=daily_history_through("2026-09-08")), patch("long_screener.resample_to_weekly", return_value=weekly), patch("long_screener.resample_to_monthly", return_value=short_monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
             signals = long_screener.check_symbol("ORCL", now=TUESDAY)
         self.assertEqual([item.timeframe for item in signals], ["weekly"])
 
@@ -194,7 +309,7 @@ class LongTimeframeRadarTests(unittest.TestCase):
             self.assertTrue(state.is_new(long_signal(timeframe="monthly", when=datetime(2026, 9, 30, 0, 0, tzinfo=ET))))
 
     def test_single_symbol_failure_does_not_abort_market_scan(self):
-        with patch("long_screener.fetch_daily", side_effect=[ValueError("bad data"), pd.DataFrame({"close": [1]})]), patch("long_screener._signals_from_daily", return_value=([], False)):
+        with patch("long_screener.fetch_daily", side_effect=[ValueError("bad data"), current_rth_daily()]), patch("long_screener._signals_from_daily", return_value=([], False)):
             signals, stats = long_screener.run_long_screener(["AMD", "NVDA"], max_workers=1, now=TUESDAY)
         self.assertEqual(signals, [])
         self.assertEqual(stats.fetched_count, 1)
@@ -206,6 +321,9 @@ class LongTimeframeRadarTests(unittest.TestCase):
             sent.assert_not_called()
             self.assertTrue((Path(directory) / "long_dxdx_signals.csv").exists())
             self.assertTrue((Path(directory) / "long_dxdx_report.txt").exists())
+            diagnostics = (Path(directory) / "long_dxdx_diagnostics.csv").read_text(encoding="utf-8-sig")
+            self.assertIn("daily_context_source", diagnostics)
+            self.assertIn("completeness_passed", diagnostics)
 
     def test_dry_run_never_creates_or_updates_state(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(long_main, "OUTPUT_DIR", Path(directory)), patch("long_main.run_long_screener", return_value=([], LongScanStats(pool_count=1, fetched_count=1))):
@@ -250,6 +368,7 @@ class LongTimeframeRadarTests(unittest.TestCase):
         self.assertIn("US Weekly Monthly DXDX Pullback Radar", long_workflow)
         self.assertIn('cron: "10 23 * * 1-5"', long_workflow)
         self.assertIn("long_main.py", long_workflow)
+        self.assertIn("long_dxdx_diagnostics.csv", long_workflow)
         self.assertNotIn("long_main.py", original)
         self.assertNotIn("long_alert_state.json", original)
 
