@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from data_fetcher import resample_to_4h
 import main
 import notifier
 import screener
@@ -40,6 +41,26 @@ def h4_frame(*, first_today: bool = False, second_today: bool = False, old_signa
     frame.iloc[-2, frame.columns.get_loc("DXDX")] = first_today
     frame.iloc[-1, frame.columns.get_loc("DXDX")] = second_today
     return frame
+
+
+def real_bfb_rth_hourly_with_extended_extremes() -> pd.DataFrame:
+    """Recorded Yahoo BF-B RTH 1H values for 2026-09-10 plus non-RTH noise."""
+    rows = [
+        ("08:30", 1.0, 999.0, 0.01, 1.0),  # pre-market: must be discarded
+        ("09:30", 26.209999, 26.379999, 26.084999, 26.330000),
+        ("10:30", 26.350000, 26.590000, 26.299999, 26.490000),
+        ("11:30", 26.480000, 26.559999, 26.420000, 26.555000),
+        ("12:30", 26.559999, 26.639999, 26.540001, 26.570000),
+        ("13:30", 26.570000, 26.629999, 26.520000, 26.549999),
+        ("14:30", 26.540001, 26.620000, 26.500000, 26.575001),
+        ("15:30", 26.575001, 26.650000, 26.559999, 26.610001),
+        ("16:30", 1.0, 999.0, 0.01, 1.0),  # after-hours: must be discarded
+    ]
+    index = pd.DatetimeIndex([pd.Timestamp(f"2026-09-10 {time}", tz=ET) for time, *_ in rows])
+    return pd.DataFrame(
+        [{"open": op, "high": high, "low": low, "close": close, "volume": 100} for _, op, high, low, close in rows],
+        index=index,
+    )
 
 
 def signal(symbol: str = "AMD", *, daily: bool = False, h4: bool = True, moment: datetime | None = None) -> Signal:
@@ -81,6 +102,48 @@ class DualTimeframeRadarTests(unittest.TestCase):
         result = self._check(daily_frame(), h4_frame(second_today=True))
         self.assertEqual(result.signal_level, "A")
         self.assertTrue(result.h4_dxdx)
+
+    def test_stale_daily_context_suppresses_current_day_h4_signal(self):
+        # Simulates Yahoo finalising the RTH 1H response before its 1D response.
+        yesterday = pd.Timestamp(NOW.date(), tz=ET) - pd.offsets.BDay(1)
+        daily = daily_frame()
+        daily.index = pd.date_range(end=yesterday, periods=120, freq="B")
+        with self.assertLogs("screener", level="WARNING") as logs:
+            result = self._check(daily, h4_frame(second_today=True))
+        self.assertIsNone(result)
+        self.assertIn("latest completed daily bar", "\n".join(logs.output))
+
+    def test_same_day_completed_daily_context_allows_h4_signal(self):
+        result = self._check(daily_frame(), h4_frame(second_today=True))
+        self.assertEqual(result.signal_level, "A")
+
+    def test_real_bfb_rth_4h_bucket_boundaries_and_extended_extremes(self):
+        bars = resample_to_4h(real_bfb_rth_hourly_with_extended_extremes())
+        self.assertEqual(list(bars.index.strftime("%H:%M")), ["13:30", "16:00"])
+        first, second = bars.iloc[0], bars.iloc[1]
+        self.assertAlmostEqual(first["open"], 26.209999, places=5)
+        self.assertAlmostEqual(first["high"], 26.639999, places=5)
+        self.assertAlmostEqual(first["low"], 26.084999, places=5)
+        self.assertAlmostEqual(first["close"], 26.570000, places=5)
+        self.assertAlmostEqual(second["open"], 26.570000, places=5)
+        self.assertAlmostEqual(second["high"], 26.650000, places=5)
+        self.assertAlmostEqual(second["low"], 26.500000, places=5)
+        self.assertAlmostEqual(second["close"], 26.610001, places=5)
+
+    def test_h4_candidate_diagnostic_contains_formula_and_daily_context(self):
+        daily = daily_frame()
+        h4 = h4_frame(second_today=True)
+        h4[["DIF", "DEA", "MACD_bar"]] = [-0.2, -0.1, -0.2]
+        h4["CCC"] = True
+        h4["JJJ"] = True
+        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+            _, diagnostic, stale = screener._check_symbol_with_diagnostic("AMD", now=NOW)
+        self.assertFalse(stale)
+        self.assertTrue(diagnostic.dxdx)
+        self.assertTrue(diagnostic.ccc)
+        self.assertTrue(diagnostic.jjj)
+        self.assertEqual(diagnostic.daily_bar_date.date(), NOW.date())
+        self.assertTrue(diagnostic.daily_fresh_for_h4)
 
     def test_daily_dxdx_creates_b_level(self):
         result = self._check(daily_frame(dxdx=True), h4_frame())
@@ -166,6 +229,9 @@ class DualTimeframeRadarTests(unittest.TestCase):
             csv_text = (Path(directory) / "dxdx_signals.csv").read_text(encoding="utf-8-sig")
             self.assertIn("signal_level", csv_text)
             self.assertIn("h4_signal_time", csv_text)
+            diagnostic_text = (Path(directory) / "h4_dxdx_diagnostics.csv").read_text(encoding="utf-8-sig")
+            self.assertIn("daily_fresh_for_h4", diagnostic_text)
+            self.assertIn("macd_bar", diagnostic_text)
             self.assertTrue((Path(directory) / "dxdx_report.txt").exists())
 
     def test_workflow_is_daily_not_half_hourly(self):
@@ -173,6 +239,7 @@ class DualTimeframeRadarTests(unittest.TestCase):
         self.assertIn('cron: "30 22 * * 1-5"', workflow)
         self.assertNotIn("*/30", workflow)
         self.assertIn("dxdx_signals.csv", workflow)
+        self.assertIn("h4_dxdx_diagnostics.csv", workflow)
 
     def test_readme_matches_levels_and_independent_design(self):
         readme = Path("README.md").read_text(encoding="utf-8")

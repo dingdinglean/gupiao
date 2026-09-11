@@ -50,10 +50,44 @@ class Signal:
 
 
 @dataclass
+class H4Diagnostic:
+    """Auditable inputs for every current-session 4H DXDX candidate.
+
+    This record is observational only.  In particular, it never adds a
+    condition to DXDX; it makes the existing calculation and the daily trend
+    context visible in the workflow artifact.
+    """
+
+    symbol: str
+    h4_signal_time: datetime
+    h4_open: float
+    h4_high: float
+    h4_low: float
+    h4_close: float
+    daily_bar_date: datetime | None
+    daily_close: float | None
+    dif: float | None
+    dea: float | None
+    macd_bar: float | None
+    ccc: bool
+    jjj: bool
+    dxdx: bool
+    blue_above_yellow: bool
+    daily_fresh_for_h4: bool
+
+    def to_dict(self) -> dict:
+        result = asdict(self)
+        for key in ("h4_signal_time", "daily_bar_date"):
+            result[key] = result[key].isoformat() if result[key] else ""
+        return result
+
+
+@dataclass
 class ScanStats:
     pool_count: int
     fetched_count: int = 0
     failed_count: int = 0
+    stale_daily_h4_count: int = 0
 
 
 def _as_new_york_time(now: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
@@ -111,10 +145,56 @@ def _trend_is_bullish(daily_row: pd.Series, strict: bool) -> bool:
     return bool(daily_row.get(column, False))
 
 
-def check_symbol(symbol: str, *, require_strict_separation: bool = False, now: datetime | pd.Timestamp | None = None) -> Signal | None:
-    """Classify one US stock: S daily+4H, A 4H, B daily."""
+def _session_date(value: datetime | pd.Timestamp) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    return (timestamp.tz_localize(NEW_YORK) if timestamp.tzinfo is None else timestamp.tz_convert(NEW_YORK)).normalize()
+
+
+def _number(row: pd.Series, column: str) -> float | None:
+    value = row.get(column)
+    return None if value is None or pd.isna(value) else float(value)
+
+
+def _build_h4_diagnostic(
+    symbol: str,
+    h4_time: pd.Timestamp,
+    h4_row: pd.Series,
+    daily_time: pd.Timestamp | None,
+    daily_row: pd.Series | None,
+    *,
+    require_strict_separation: bool,
+) -> H4Diagnostic:
+    blue_above_yellow = bool(daily_row is not None and _trend_is_bullish(daily_row, require_strict_separation))
+    daily_fresh = daily_time is not None and _session_date(daily_time) == _session_date(h4_time)
+    return H4Diagnostic(
+        symbol=symbol,
+        h4_signal_time=h4_time.to_pydatetime(),
+        h4_open=float(h4_row["open"]),
+        h4_high=float(h4_row["high"]),
+        h4_low=float(h4_row["low"]),
+        h4_close=float(h4_row["close"]),
+        daily_bar_date=daily_time.to_pydatetime() if daily_time is not None else None,
+        daily_close=_number(daily_row, "close") if daily_row is not None else None,
+        dif=_number(h4_row, "DIF"),
+        dea=_number(h4_row, "DEA"),
+        macd_bar=_number(h4_row, "MACD_bar"),
+        ccc=bool(h4_row.get("CCC", False)),
+        jjj=bool(h4_row.get("JJJ", False)),
+        dxdx=bool(h4_row.get("DXDX", False)),
+        blue_above_yellow=blue_above_yellow,
+        daily_fresh_for_h4=daily_fresh,
+    )
+
+
+def _check_symbol_with_diagnostic(
+    symbol: str,
+    *,
+    require_strict_separation: bool = False,
+    now: datetime | pd.Timestamp | None = None,
+) -> tuple[Signal | None, H4Diagnostic | None, bool]:
+    """Classify one stock and retain a trace for any current 4H DXDX bar."""
     if not is_us_listed_stock(symbol):
-        return None
+        return None, None, False
     try:
         daily = add_all_indicators(fetch_daily(symbol, period="3y"))
         h4 = add_all_indicators(fetch_4h(symbol, period="730d"))
@@ -125,18 +205,52 @@ def check_symbol(symbol: str, *, require_strict_separation: bool = False, now: d
         raise ValueError("insufficient daily or 4H history")
 
     daily_latest = latest_complete_daily(daily, now)
+    daily_time, daily_row = daily_latest if daily_latest is not None else (None, None)
+    h4_match = current_day_h4_dxdx(h4, now)
+    diagnostic = (
+        _build_h4_diagnostic(
+            symbol,
+            h4_match[0],
+            h4_match[1],
+            daily_time,
+            daily_row,
+            require_strict_separation=require_strict_separation,
+        )
+        if h4_match is not None
+        else None
+    )
     if daily_latest is None:
-        return None
-    daily_time, daily_row = daily_latest
+        if h4_match is not None:
+            log.warning(
+                "%s suppressing 4H DXDX at %s: no completed daily bar is available",
+                symbol,
+                h4_match[0].isoformat(),
+            )
+        return None, diagnostic, h4_match is not None
+
+    stale_daily_h4 = False
+    if h4_match is not None and _session_date(daily_time) != _session_date(h4_match[0]):
+        # A post-close 4H signal cannot borrow yesterday's daily EMA channel.
+        # Yahoo occasionally finalises hourly data before its daily response.
+        # Suppress only the A/S 4H portion and let a later run evaluate it once
+        # the matching RTH daily bar is complete.
+        stale_daily_h4 = True
+        log.warning(
+            "%s suppressing 4H DXDX at %s: latest completed daily bar %s is stale",
+            symbol,
+            h4_match[0].isoformat(),
+            daily_time.isoformat(),
+        )
+        h4_match = None
+
     bullish = _trend_is_bullish(daily_row, require_strict_separation)
     if not bullish:
-        return None
+        return None, diagnostic, stale_daily_h4
 
     daily_dxdx = bool(daily_row.get("DXDX", False))
-    h4_match = current_day_h4_dxdx(h4, now)
     h4_dxdx = h4_match is not None
     if not daily_dxdx and not h4_dxdx:
-        return None
+        return None, diagnostic, stale_daily_h4
 
     level = "S" if daily_dxdx and h4_dxdx else ("A" if h4_dxdx else "B")
     h4_time = h4_match[0].to_pydatetime() if h4_match else None
@@ -150,20 +264,44 @@ def check_symbol(symbol: str, *, require_strict_separation: bool = False, now: d
         close=float(daily_row["close"]),
         blue_above_yellow=True,
         detected_at=_as_new_york_time(now).to_pydatetime(),
+    ), diagnostic, stale_daily_h4
+
+
+def check_symbol(symbol: str, *, require_strict_separation: bool = False, now: datetime | pd.Timestamp | None = None) -> Signal | None:
+    """Classify one US stock: S daily+4H, A 4H, B daily."""
+    signal, _, _ = _check_symbol_with_diagnostic(
+        symbol,
+        require_strict_separation=require_strict_separation,
+        now=now,
     )
+    return signal
 
 
-def run_screener(symbols: list[str], *, require_strict_separation: bool = False, max_workers: int = 6, now: datetime | pd.Timestamp | None = None) -> tuple[list[Signal], ScanStats]:
+def run_screener(
+    symbols: list[str],
+    *,
+    require_strict_separation: bool = False,
+    max_workers: int = 6,
+    now: datetime | pd.Timestamp | None = None,
+    diagnostics: list[H4Diagnostic] | None = None,
+) -> tuple[list[Signal], ScanStats]:
     allowed = [symbol for symbol in symbols if is_us_listed_stock(symbol)]
     stats = ScanStats(pool_count=len(allowed))
     signals: list[Signal] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(check_symbol, symbol, require_strict_separation=require_strict_separation, now=now): symbol for symbol in allowed}
+        check = _check_symbol_with_diagnostic if diagnostics is not None else check_symbol
+        futures = {executor.submit(check, symbol, require_strict_separation=require_strict_separation, now=now): symbol for symbol in allowed}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
                 result = future.result()
                 stats.fetched_count += 1
+                if diagnostics is not None:
+                    result, diagnostic, stale_daily_h4 = result
+                    if diagnostic is not None:
+                        diagnostics.append(diagnostic)
+                    if stale_daily_h4:
+                        stats.stale_daily_h4_count += 1
                 if result:
                     signals.append(result)
             except Exception as exc:

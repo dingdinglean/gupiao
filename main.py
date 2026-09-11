@@ -15,7 +15,7 @@ except ImportError:  # Test/minimal environments can still use process env.
         return False
 
 from notifier import format_signals_email, send_email
-from screener import ScanStats, Signal, run_screener
+from screener import H4Diagnostic, ScanStats, Signal, run_screener
 from state import AlertState
 from universe import get_universe
 
@@ -52,19 +52,39 @@ def require_smtp_config(cfg: dict) -> None:
         raise RuntimeError("Missing required SMTP configuration: " + ", ".join(missing))
 
 
-def write_reports(signals: list[Signal], stats: ScanStats, *, email_sent: bool, detected_at: datetime) -> None:
+def write_reports(
+    signals: list[Signal],
+    stats: ScanStats,
+    *,
+    email_sent: bool,
+    detected_at: datetime,
+    diagnostics: list[H4Diagnostic] | None = None,
+) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     fields = ["symbol", "signal_level", "daily_dxdx", "h4_dxdx", "daily_signal_time", "h4_signal_time", "close", "blue_above_yellow", "detected_at"]
     with (OUTPUT_DIR / "dxdx_signals.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(signal.to_dict() for signal in signals)
+    diagnostic_fields = [
+        "symbol", "h4_signal_time", "h4_open", "h4_high", "h4_low", "h4_close",
+        "daily_bar_date", "daily_close", "dif", "dea", "macd_bar", "ccc", "jjj",
+        "dxdx", "blue_above_yellow", "daily_fresh_for_h4",
+    ]
+    with (OUTPUT_DIR / "h4_dxdx_diagnostics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=diagnostic_fields)
+        writer.writeheader()
+        writer.writerows(
+            item.to_dict()
+            for item in sorted(diagnostics or [], key=lambda item: (item.h4_signal_time, item.symbol))
+        )
     counts = {level: sum(signal.signal_level == level for signal in signals) for level in ("S", "A", "B")}
     lines = [
         "【美股双周期抄底雷达】",
         f"股票池数量：{stats.pool_count}",
         f"成功取数数量：{stats.fetched_count}",
         f"数据失败数量：{stats.failed_count}",
+        f"4H候选日线未就绪数量：{stats.stale_daily_h4_count}",
         f"S级数量：{counts['S']}",
         f"A级数量：{counts['A']}",
         f"B级数量：{counts['B']}",
@@ -76,16 +96,22 @@ def write_reports(signals: list[Signal], stats: ScanStats, *, email_sent: bool, 
 
 def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool = False) -> tuple[list[Signal], ScanStats, bool]:
     started = datetime.now()
-    signals, stats = run_screener(symbols, require_strict_separation=cfg["strict_separation"], max_workers=cfg["max_workers"])
+    diagnostics: list[H4Diagnostic] = []
+    signals, stats = run_screener(
+        symbols,
+        require_strict_separation=cfg["strict_separation"],
+        max_workers=cfg["max_workers"],
+        diagnostics=diagnostics,
+    )
     new_signals = state.filter_new(signals)
     if not new_signals:
         log.info("No new DXDX signals; email skipped.")
-        write_reports(signals, stats, email_sent=False, detected_at=started)
+        write_reports(signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
         state.save()
         return signals, stats, False
     if dry_run:
         log.info("Dry run: %s new DXDX signal(s); email skipped.", len(new_signals))
-        write_reports(new_signals, stats, email_sent=False, detected_at=started)
+        write_reports(new_signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
         return new_signals, stats, False
     require_smtp_config(cfg)
     subject, body = format_signals_email(new_signals, pool_count=stats.pool_count, scan_time=started)
@@ -93,7 +119,7 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool 
     for signal in new_signals:
         state.mark_sent(signal)
     state.save()
-    write_reports(new_signals, stats, email_sent=True, detected_at=started)
+    write_reports(new_signals, stats, email_sent=True, detected_at=started, diagnostics=diagnostics)
     return new_signals, stats, True
 
 

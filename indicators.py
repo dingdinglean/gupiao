@@ -136,7 +136,9 @@ def compute_macd_divergence(df: pd.DataFrame) -> pd.DataFrame:
     """Compute the full MACD divergence signal set from cd.docx.
 
     Input df must have columns ['open', 'high', 'low', 'close'].
-    Adds DIF, DEA, MACD_bar, LLL, DXDX, DBL and DBJGXC.
+    Adds DIF, DEA, MACD_bar, LLL, DXDX, DBL and DBJGXC.  ``CCC`` and
+    ``JJJ`` are also exposed as diagnostic-only intermediate values; they do
+    not participate in any additional filtering or alter the formula.
     """
     close = df["close"]
 
@@ -191,6 +193,10 @@ def compute_macd_divergence(df: pd.DataFrame) -> pd.DataFrame:
     out["DEA"] = A
     out["MACD_bar"] = M
     out["LLL"] = _bfalse(LLL)
+    # Keep the exact formula above, but surface its two bottom-side
+    # intermediates for an auditable 4H candidate trace.
+    out["CCC"] = _bfalse(CCC)
+    out["JJJ"] = _bfalse(JJJ)
     out["DXDX"] = _bfalse(DXDX)
     out["DBL"] = _bfalse(DBL)
     out["DBJGXC"] = _bfalse(DBJGXC)
