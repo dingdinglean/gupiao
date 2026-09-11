@@ -12,6 +12,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 MARKET_OPEN_MINUTE = 9 * 60 + 30
 SECOND_BAR_START_MINUTE = 13 * 60 + 30
 MARKET_CLOSE_MINUTE = 16 * 60
+RTH_HOURLY_STARTS = (570, 630, 690, 750, 810, 870, 930)  # 09:30 … 15:30 ET
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
@@ -140,6 +141,57 @@ def resample_to_4h(hourly: pd.DataFrame) -> pd.DataFrame:
 
     out.index = pd.DatetimeIndex(bar_ends, name=hourly.index.name)
     return out.dropna(subset=["close"])
+
+
+def rth_hourly_to_daily(
+    hourly: pd.DataFrame,
+    session_date: pd.Timestamp,
+    *,
+    now: pd.Timestamp,
+    close_grace: pd.Timedelta = pd.Timedelta(minutes=20),
+) -> pd.DataFrame:
+    """Build one completed RTH daily bar from Yahoo's RTH 1H response.
+
+    Yahoo can publish a completed intraday response before its ``1d`` bar.
+    This helper is deliberately strict: it accepts only the seven expected
+    RTH hourly starts, only after 16:00 ET plus the caller's grace period.
+    It never fills missing bars or uses extended-hours rows.
+    """
+    if hourly.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    session = _as_new_york_index(hourly)
+    target_date = pd.Timestamp(session_date)
+    target_date = target_date.tz_localize(NEW_YORK) if target_date.tzinfo is None else target_date.tz_convert(NEW_YORK)
+    target_date = target_date.normalize()
+    now_et = pd.Timestamp(now)
+    now_et = now_et.tz_localize(NEW_YORK) if now_et.tzinfo is None else now_et.tz_convert(NEW_YORK)
+    if now_et < target_date + pd.Timedelta(hours=16) + close_grace:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    session = _regular_session_only(session)
+    session = session[session.index.normalize() == target_date]
+    if session.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    expected = pd.DatetimeIndex([target_date + pd.Timedelta(minutes=minute) for minute in RTH_HOURLY_STARTS])
+    # Exact reindexing rejects missing, duplicated, or unexpected bar starts.
+    if len(session) != len(expected) or not session.index.equals(expected):
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    required = ["open", "high", "low", "close", "volume"]
+    if any(column not in session.columns for column in required) or session[required].isna().any().any():
+        return pd.DataFrame(columns=required)
+
+    return pd.DataFrame(
+        {
+            "open": [float(session["open"].iloc[0])],
+            "high": [float(session["high"].max())],
+            "low": [float(session["low"].min())],
+            "close": [float(session["close"].iloc[-1])],
+            "volume": [float(session["volume"].sum())],
+        },
+        index=pd.DatetimeIndex([target_date], name=hourly.index.name),
+    )
 
 
 def _resample_ohlcv(daily: pd.DataFrame, frequency: str) -> pd.DataFrame:

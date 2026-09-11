@@ -69,7 +69,7 @@ def write_reports(
     diagnostic_fields = [
         "symbol", "h4_signal_time", "h4_open", "h4_high", "h4_low", "h4_close",
         "daily_bar_date", "daily_close", "dif", "dea", "macd_bar", "ccc", "jjj",
-        "dxdx", "blue_above_yellow", "daily_fresh_for_h4",
+        "dxdx", "blue_above_yellow", "daily_fresh_for_h4", "daily_context_source",
     ]
     with (OUTPUT_DIR / "h4_dxdx_diagnostics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=diagnostic_fields)

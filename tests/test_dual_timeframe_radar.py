@@ -9,7 +9,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from data_fetcher import resample_to_4h
+from data_fetcher import resample_to_4h, rth_hourly_to_daily
+from indicators import add_all_indicators
 import main
 import notifier
 import screener
@@ -71,7 +72,7 @@ def signal(symbol: str = "AMD", *, daily: bool = False, h4: bool = True, moment:
 
 class DualTimeframeRadarTests(unittest.TestCase):
     def _check(self, daily: pd.DataFrame, h4: pd.DataFrame, now: datetime = NOW, strict: bool = False):
-        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_hourly", return_value=pd.DataFrame()), patch("screener.resample_to_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
             return screener.check_symbol("AMD", now=now, require_strict_separation=strict)
 
     def test_sp500_and_nasdaq100_are_deduplicated(self):
@@ -136,7 +137,7 @@ class DualTimeframeRadarTests(unittest.TestCase):
         h4[["DIF", "DEA", "MACD_bar"]] = [-0.2, -0.1, -0.2]
         h4["CCC"] = True
         h4["JJJ"] = True
-        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_hourly", return_value=pd.DataFrame()), patch("screener.resample_to_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
             _, diagnostic, stale = screener._check_symbol_with_diagnostic("AMD", now=NOW)
         self.assertFalse(stale)
         self.assertTrue(diagnostic.dxdx)
@@ -144,6 +145,75 @@ class DualTimeframeRadarTests(unittest.TestCase):
         self.assertTrue(diagnostic.jjj)
         self.assertEqual(diagnostic.daily_bar_date.date(), NOW.date())
         self.assertTrue(diagnostic.daily_fresh_for_h4)
+        self.assertEqual(diagnostic.daily_context_source, "yahoo_daily")
+
+    def test_completed_rth_hourly_fallback_builds_correct_daily_ohlcv(self):
+        hourly = real_bfb_rth_hourly_with_extended_extremes()
+        daily = rth_hourly_to_daily(
+            hourly,
+            pd.Timestamp("2026-09-10", tz=ET),
+            now=pd.Timestamp("2026-09-10 16:20", tz=ET),
+        )
+        self.assertEqual(len(daily), 1)
+        bar = daily.iloc[0]
+        self.assertAlmostEqual(bar["open"], 26.209999, places=5)
+        self.assertAlmostEqual(bar["high"], 26.650000, places=5)
+        self.assertAlmostEqual(bar["low"], 26.084999, places=5)
+        self.assertAlmostEqual(bar["close"], 26.610001, places=5)
+        self.assertEqual(bar["volume"], 700.0)  # seven RTH bars; extended rows excluded
+
+    def test_rth_hourly_fallback_requires_all_session_bars_after_close_grace(self):
+        hourly = real_bfb_rth_hourly_with_extended_extremes()
+        before_close = rth_hourly_to_daily(
+            hourly,
+            pd.Timestamp("2026-09-10", tz=ET),
+            now=pd.Timestamp("2026-09-10 16:19", tz=ET),
+        )
+        incomplete = rth_hourly_to_daily(
+            hourly.drop(pd.Timestamp("2026-09-10 15:30", tz=ET)),
+            pd.Timestamp("2026-09-10", tz=ET),
+            now=pd.Timestamp("2026-09-10 16:20", tz=ET),
+        )
+        self.assertTrue(before_close.empty)
+        self.assertTrue(incomplete.empty)
+
+    def test_stale_daily_uses_same_day_rth_hourly_fallback_and_real_close(self):
+        yesterday = pd.Timestamp(NOW.date(), tz=ET) - pd.offsets.BDay(1)
+        index = pd.date_range(end=yesterday, periods=120, freq="B")
+        daily = pd.DataFrame(
+            {"open": 26.0, "high": 26.5, "low": 25.5, "close": 26.0, "volume": 1_000_000},
+            index=index,
+        )
+        h4 = h4_frame(second_today=True)
+        hourly = real_bfb_rth_hourly_with_extended_extremes().copy()
+        hourly.index = hourly.index + pd.Timedelta(days=(pd.Timestamp(NOW.date()) - pd.Timestamp("2026-09-10")).days)
+
+        def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
+            # The pre-built 4H fixture already carries its candidate DXDX;
+            # daily input must use the real indicator implementation.
+            return frame if "DXDX" in frame.columns else add_all_indicators(frame)
+
+        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_hourly", return_value=hourly), patch("screener.resample_to_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=add_indicators):
+            result, diagnostic, stale = screener._check_symbol_with_diagnostic("AMD", now=NOW)
+        self.assertFalse(stale)
+        self.assertEqual(result.signal_level, "A")
+        self.assertAlmostEqual(result.close, 26.610001, places=5)
+        self.assertEqual(diagnostic.daily_context_source, "rth_hourly_fallback")
+        self.assertEqual(diagnostic.daily_bar_date.date(), NOW.date())
+        self.assertTrue(diagnostic.blue_above_yellow)
+
+    def test_incomplete_hourly_keeps_stale_daily_candidate_rejected(self):
+        yesterday = pd.Timestamp(NOW.date(), tz=ET) - pd.offsets.BDay(1)
+        daily = daily_frame()
+        daily.index = pd.date_range(end=yesterday, periods=120, freq="B")
+        hourly = real_bfb_rth_hourly_with_extended_extremes().copy()
+        hourly.index = hourly.index + pd.Timedelta(days=(pd.Timestamp(NOW.date()) - pd.Timestamp("2026-09-10")).days)
+        hourly = hourly.drop(hourly.index[hourly.index.strftime("%H:%M") == "15:30"])
+        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_hourly", return_value=hourly), patch("screener.resample_to_4h", return_value=h4_frame(second_today=True)), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+            result, diagnostic, stale = screener._check_symbol_with_diagnostic("AMD", now=NOW)
+        self.assertIsNone(result)
+        self.assertTrue(stale)
+        self.assertEqual(diagnostic.daily_context_source, "stale_rejected")
 
     def test_daily_dxdx_creates_b_level(self):
         result = self._check(daily_frame(dxdx=True), h4_frame())
@@ -231,6 +301,7 @@ class DualTimeframeRadarTests(unittest.TestCase):
             self.assertIn("h4_signal_time", csv_text)
             diagnostic_text = (Path(directory) / "h4_dxdx_diagnostics.csv").read_text(encoding="utf-8-sig")
             self.assertIn("daily_fresh_for_h4", diagnostic_text)
+            self.assertIn("daily_context_source", diagnostic_text)
             self.assertIn("macd_bar", diagnostic_text)
             self.assertTrue((Path(directory) / "dxdx_report.txt").exists())
 

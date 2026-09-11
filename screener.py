@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from data_fetcher import fetch_4h, fetch_daily
+from data_fetcher import fetch_daily, fetch_hourly, resample_to_4h, rth_hourly_to_daily
 from indicators import add_all_indicators
 from universe import is_us_listed_stock
 
@@ -74,6 +74,7 @@ class H4Diagnostic:
     dxdx: bool
     blue_above_yellow: bool
     daily_fresh_for_h4: bool
+    daily_context_source: str
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -163,6 +164,7 @@ def _build_h4_diagnostic(
     daily_row: pd.Series | None,
     *,
     require_strict_separation: bool,
+    daily_context_source: str,
 ) -> H4Diagnostic:
     blue_above_yellow = bool(daily_row is not None and _trend_is_bullish(daily_row, require_strict_separation))
     daily_fresh = daily_time is not None and _session_date(daily_time) == _session_date(h4_time)
@@ -183,7 +185,17 @@ def _build_h4_diagnostic(
         dxdx=bool(h4_row.get("DXDX", False)),
         blue_above_yellow=blue_above_yellow,
         daily_fresh_for_h4=daily_fresh,
+        daily_context_source=daily_context_source,
     )
+
+
+def _replace_session_daily_bar(daily: pd.DataFrame, session_daily: pd.DataFrame) -> pd.DataFrame:
+    """Replace a date-labelled daily bar before rerunning the existing indicators."""
+    session_date = _session_date(session_daily.index[0])
+    index = pd.DatetimeIndex(daily.index)
+    index_et = index.tz_localize(NEW_YORK) if index.tz is None else index.tz_convert(NEW_YORK)
+    earlier = daily.loc[index_et.normalize() < session_date]
+    return pd.concat([earlier, session_daily]).sort_index()
 
 
 def _check_symbol_with_diagnostic(
@@ -196,8 +208,10 @@ def _check_symbol_with_diagnostic(
     if not is_us_listed_stock(symbol):
         return None, None, False
     try:
-        daily = add_all_indicators(fetch_daily(symbol, period="3y"))
-        h4 = add_all_indicators(fetch_4h(symbol, period="730d"))
+        daily_raw = fetch_daily(symbol, period="3y")
+        hourly = fetch_hourly(symbol, period="730d")
+        daily = add_all_indicators(daily_raw)
+        h4 = add_all_indicators(resample_to_4h(hourly))
     except Exception as exc:
         log.warning("%s data error: %s", symbol, exc)
         raise
@@ -207,6 +221,30 @@ def _check_symbol_with_diagnostic(
     daily_latest = latest_complete_daily(daily, now)
     daily_time, daily_row = daily_latest if daily_latest is not None else (None, None)
     h4_match = current_day_h4_dxdx(h4, now)
+    daily_context_source = "yahoo_daily"
+
+    # When Yahoo's completed 1D endpoint trails its completed RTH 1H endpoint,
+    # reconstruct only today's daily bar from those already-RTH-filtered hourly
+    # bars.  Then run the *same* existing daily indicator pipeline over the
+    # amended history.  No 4H/DXDX math is changed.
+    if h4_match is not None and (daily_time is None or _session_date(daily_time) != _session_date(h4_match[0])):
+        fallback_daily = rth_hourly_to_daily(
+            hourly,
+            _session_date(h4_match[0]),
+            now=_as_new_york_time(now),
+            close_grace=CLOSE_GRACE,
+        )
+        if not fallback_daily.empty:
+            daily = add_all_indicators(_replace_session_daily_bar(daily_raw, fallback_daily))
+            daily_latest = latest_complete_daily(daily, now)
+            daily_time, daily_row = daily_latest if daily_latest is not None else (None, None)
+            if daily_time is not None and _session_date(daily_time) == _session_date(h4_match[0]):
+                daily_context_source = "rth_hourly_fallback"
+            else:
+                daily_context_source = "stale_rejected"
+        else:
+            daily_context_source = "stale_rejected"
+
     diagnostic = (
         _build_h4_diagnostic(
             symbol,
@@ -215,6 +253,7 @@ def _check_symbol_with_diagnostic(
             daily_time,
             daily_row,
             require_strict_separation=require_strict_separation,
+            daily_context_source=daily_context_source,
         )
         if h4_match is not None
         else None
