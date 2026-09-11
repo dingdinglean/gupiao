@@ -15,6 +15,7 @@ import pandas as pd
 
 from data_fetcher import fetch_daily, fetch_hourly, resample_to_4h, rth_hourly_to_daily
 from indicators import add_all_indicators
+from session_calendar import nyse_session
 from universe import is_us_listed_stock
 
 log = logging.getLogger(__name__)
@@ -103,7 +104,10 @@ def _closed_positions(df: pd.DataFrame, timeframe: str, now: datetime | pd.Times
     now_et = _as_new_york_time(now)
     index = pd.DatetimeIndex(df.index)
     index_et = index.tz_localize(NEW_YORK) if index.tz is None else index.tz_convert(NEW_YORK)
-    session_close = index_et.normalize() + pd.Timedelta(hours=16) + CLOSE_GRACE
+    session_close = pd.DatetimeIndex([
+        nyse_session(label).close + CLOSE_GRACE if nyse_session(label) is not None else label.normalize() + pd.Timedelta(hours=16) + CLOSE_GRACE
+        for label in index_et
+    ])
     if timeframe == "daily":
         closes_at = session_close
     elif timeframe == "4h":

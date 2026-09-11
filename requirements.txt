@@ -5,3 +5,4 @@ lxml>=4.9
 html5lib>=1.1
 beautifulsoup4>=4.12
 python-dotenv>=1.0
+pandas-market-calendars>=4.4

@@ -64,6 +64,28 @@ def real_bfb_rth_hourly_with_extended_extremes() -> pd.DataFrame:
     )
 
 
+def early_close_rth_hourly_with_extended_extremes(day: str = "2026-11-27") -> pd.DataFrame:
+    """XNYS Black Friday session: 09:30--13:00, plus forbidden extras."""
+    index = pd.DatetimeIndex([
+        pd.Timestamp(f"{day} 08:30", tz=ET),
+        pd.Timestamp(f"{day} 09:30", tz=ET),
+        pd.Timestamp(f"{day} 10:30", tz=ET),
+        pd.Timestamp(f"{day} 11:30", tz=ET),
+        pd.Timestamp(f"{day} 12:30", tz=ET),
+        pd.Timestamp(f"{day} 13:30", tz=ET),
+    ])
+    return pd.DataFrame(
+        {
+            "open": [1.0, 10.0, 11.0, 12.0, 13.0, 1.0],
+            "high": [999.0, 11.0, 12.0, 13.0, 14.0, 999.0],
+            "low": [0.01, 9.0, 10.0, 11.0, 12.0, 0.01],
+            "close": [1.0, 11.0, 12.0, 13.0, 14.0, 1.0],
+            "volume": [9999.0, 100.0, 100.0, 100.0, 100.0, 9999.0],
+        },
+        index=index,
+    )
+
+
 def signal(symbol: str = "AMD", *, daily: bool = False, h4: bool = True, moment: datetime | None = None) -> Signal:
     moment = moment or datetime(2026, 9, 8, 16, 0, tzinfo=ET)
     level = "S" if daily and h4 else ("A" if h4 else "B")
@@ -176,6 +198,36 @@ class DualTimeframeRadarTests(unittest.TestCase):
         )
         self.assertTrue(before_close.empty)
         self.assertTrue(incomplete.empty)
+
+    def test_early_close_rth_fallback_uses_actual_1300_close_and_excludes_afterhours(self):
+        hourly = early_close_rth_hourly_with_extended_extremes()
+        before_grace = rth_hourly_to_daily(
+            hourly,
+            pd.Timestamp("2026-11-27", tz=ET),
+            now=pd.Timestamp("2026-11-27 13:19", tz=ET),
+        )
+        completed = rth_hourly_to_daily(
+            hourly,
+            pd.Timestamp("2026-11-27", tz=ET),
+            now=pd.Timestamp("2026-11-27 13:20", tz=ET),
+        )
+        missing_required = rth_hourly_to_daily(
+            hourly.drop(pd.Timestamp("2026-11-27 11:30", tz=ET)),
+            pd.Timestamp("2026-11-27", tz=ET),
+            now=pd.Timestamp("2026-11-27 13:20", tz=ET),
+        )
+        self.assertTrue(before_grace.empty)
+        self.assertTrue(missing_required.empty)
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(float(completed.iloc[0]["high"]), 14.0)
+        self.assertEqual(float(completed.iloc[0]["low"]), 9.0)
+        self.assertEqual(float(completed.iloc[0]["close"]), 14.0)
+        self.assertEqual(float(completed.iloc[0]["volume"]), 400.0)
+
+    def test_early_close_4h_bar_ends_at_actual_session_close(self):
+        bars = resample_to_4h(early_close_rth_hourly_with_extended_extremes())
+        self.assertEqual(list(bars.index.strftime("%H:%M")), ["13:00"])
+        self.assertEqual(float(bars.iloc[0]["volume"]), 400.0)
 
     def test_stale_daily_uses_same_day_rth_hourly_fallback_and_real_close(self):
         yesterday = pd.Timestamp(NOW.date(), tz=ET) - pd.offsets.BDay(1)

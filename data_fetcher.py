@@ -6,13 +6,12 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from session_calendar import expected_hourly_starts, nyse_session
+
 log = logging.getLogger(__name__)
 
 NEW_YORK = ZoneInfo("America/New_York")
-MARKET_OPEN_MINUTE = 9 * 60 + 30
 SECOND_BAR_START_MINUTE = 13 * 60 + 30
-MARKET_CLOSE_MINUTE = 16 * 60
-RTH_HOURLY_STARTS = (570, 630, 690, 750, 810, 870, 930)  # 09:30 … 15:30 ET
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
@@ -42,16 +41,18 @@ def _as_new_york_index(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep weekday bars from 09:30 inclusive to 16:00 exclusive, New York time."""
+    """Keep only bars within each date's actual XNYS regular session."""
     if df.empty:
         return df
 
     out = _as_new_york_index(df)
-    out = out[out.index.dayofweek < 5]
-
-    minutes = out.index.hour * 60 + out.index.minute
-    in_session = (minutes >= MARKET_OPEN_MINUTE) & (minutes < MARKET_CLOSE_MINUTE)
-    return out.loc[in_session]
+    keep = pd.Series(False, index=out.index)
+    for day, positions in out.groupby(out.index.normalize()).groups.items():
+        bounds = nyse_session(day)
+        if bounds is not None:
+            index = pd.DatetimeIndex(positions)
+            keep.loc[index] = (index >= bounds.open) & (index < bounds.close)
+    return out.loc[keep.to_numpy()]
 
 
 def _daily_regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
@@ -67,11 +68,15 @@ def _daily_regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     out = _as_new_york_index(df)
-    minutes = out.index.hour * 60 + out.index.minute
     date_labelled = out.index == out.index.normalize()
-    in_session = (minutes >= MARKET_OPEN_MINUTE) & (minutes <= MARKET_CLOSE_MINUTE)
-    is_weekday = out.index.dayofweek < 5
-    return out.loc[is_weekday & (date_labelled | in_session)]
+    keep = pd.Series(False, index=out.index)
+    for day, positions in out.groupby(out.index.normalize()).groups.items():
+        bounds = nyse_session(day)
+        if bounds is None:
+            continue
+        index = pd.DatetimeIndex(positions)
+        keep.loc[index] = date_labelled[out.index.get_indexer(index)] | ((index >= bounds.open) & (index <= bounds.close))
+    return out.loc[keep.to_numpy()]
 
 
 def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:
@@ -133,10 +138,13 @@ def resample_to_4h(hourly: pd.DataFrame) -> pd.DataFrame:
 
     bar_ends: list[pd.Timestamp] = []
     for session, bucket in out.index:
+        bounds = nyse_session(session)
+        if bounds is None:
+            continue
         if int(bucket) == 0:
-            bar_end = session + pd.Timedelta(hours=13, minutes=30)
+            bar_end = min(session + pd.Timedelta(hours=13, minutes=30), bounds.close)
         else:
-            bar_end = session + pd.Timedelta(hours=16)
+            bar_end = bounds.close
         bar_ends.append(bar_end)
 
     out.index = pd.DatetimeIndex(bar_ends, name=hourly.index.name)
@@ -153,8 +161,9 @@ def rth_hourly_to_daily(
     """Build one completed RTH daily bar from Yahoo's RTH 1H response.
 
     Yahoo can publish a completed intraday response before its ``1d`` bar.
-    This helper is deliberately strict: it accepts only the seven expected
-    RTH hourly starts, only after 16:00 ET plus the caller's grace period.
+    This helper is deliberately strict: it accepts only the expected RTH
+    hourly starts for the actual XNYS session, only after that session's close
+    plus the caller's grace period.
     It never fills missing bars or uses extended-hours rows.
     """
     if hourly.empty:
@@ -166,7 +175,8 @@ def rth_hourly_to_daily(
     target_date = target_date.normalize()
     now_et = pd.Timestamp(now)
     now_et = now_et.tz_localize(NEW_YORK) if now_et.tzinfo is None else now_et.tz_convert(NEW_YORK)
-    if now_et < target_date + pd.Timedelta(hours=16) + close_grace:
+    bounds = nyse_session(target_date)
+    if bounds is None or now_et < bounds.close + close_grace:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
     session = _regular_session_only(session)
@@ -174,7 +184,7 @@ def rth_hourly_to_daily(
     if session.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
 
-    expected = pd.DatetimeIndex([target_date + pd.Timedelta(minutes=minute) for minute in RTH_HOURLY_STARTS])
+    expected = expected_hourly_starts(target_date)
     # Exact reindexing rejects missing, duplicated, or unexpected bar starts.
     if len(session) != len(expected) or not session.index.equals(expected):
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])

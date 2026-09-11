@@ -10,23 +10,10 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from functools import lru_cache
 from typing import Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from pandas.tseries.holiday import (
-    AbstractHolidayCalendar,
-    GoodFriday,
-    Holiday,
-    USLaborDay,
-    USMartinLutherKingJr,
-    USMemorialDay,
-    USPresidentsDay,
-    USThanksgivingDay,
-    nearest_workday,
-)
-
 from data_fetcher import (
     _daily_regular_session_only,
     fetch_daily,
@@ -36,6 +23,7 @@ from data_fetcher import (
     rth_hourly_to_daily,
 )
 from indicators import compute_macd_divergence
+from session_calendar import next_nyse_trading_day, nyse_session, previous_nyse_trading_day
 from universe import is_us_listed_stock
 
 log = logging.getLogger(__name__)
@@ -43,25 +31,6 @@ NEW_YORK = ZoneInfo("America/New_York")
 CLOSE_GRACE = pd.Timedelta(minutes=20)
 MIN_BARS = 120
 
-
-class _NYSEHolidayCalendar(AbstractHolidayCalendar):
-    """Regular NYSE holidays needed to identify a period's final trading day."""
-
-    rules = [
-        Holiday("NewYearsDay", month=1, day=1, observance=nearest_workday),
-        USMartinLutherKingJr,
-        USPresidentsDay,
-        GoodFriday,
-        USMemorialDay,
-        Holiday("Juneteenth", month=6, day=19, observance=nearest_workday, start_date="2022-01-01"),
-        Holiday("IndependenceDay", month=7, day=4, observance=nearest_workday),
-        USLaborDay,
-        USThanksgivingDay,
-        Holiday("Christmas", month=12, day=25, observance=nearest_workday),
-    ]
-
-
-NYSE_HOLIDAYS = _NYSEHolidayCalendar()
 
 
 @dataclass
@@ -128,31 +97,12 @@ def _as_new_york_index(index: pd.Index) -> pd.DatetimeIndex:
     return timestamps.tz_localize(NEW_YORK) if timestamps.tz is None else timestamps.tz_convert(NEW_YORK)
 
 
-@lru_cache(maxsize=None)
-def _nyse_holidays_for_year(year: int) -> frozenset[pd.Timestamp]:
-    holidays = NYSE_HOLIDAYS.holidays(start=f"{year}-01-01", end=f"{year}-12-31")
-    return frozenset(pd.Timestamp(day).normalize() for day in holidays)
-
-
-def _is_us_market_trading_day(day: pd.Timestamp) -> bool:
-    candidate = pd.Timestamp(day).normalize().tz_localize(None)
-    if candidate.dayofweek >= 5:
-        return False
-    return candidate not in _nyse_holidays_for_year(candidate.year)
-
-
 def _previous_trading_day(day: pd.Timestamp) -> pd.Timestamp:
-    candidate = _as_new_york_index(pd.DatetimeIndex([day]))[0].normalize()
-    while not _is_us_market_trading_day(candidate):
-        candidate -= pd.Timedelta(days=1)
-    return candidate
+    return previous_nyse_trading_day(day)
 
 
 def _next_trading_day(day: pd.Timestamp) -> pd.Timestamp:
-    candidate = _as_new_york_index(pd.DatetimeIndex([day]))[0].normalize() + pd.Timedelta(days=1)
-    while not _is_us_market_trading_day(candidate):
-        candidate += pd.Timedelta(days=1)
-    return candidate
+    return next_nyse_trading_day(day)
 
 
 def last_required_trading_date(label: pd.Timestamp, timeframe: str) -> pd.Timestamp:
@@ -168,12 +118,14 @@ def last_required_trading_date(label: pd.Timestamp, timeframe: str) -> pd.Timest
 def _bar_complete_at(label: pd.Timestamp, timeframe: str) -> pd.Timestamp:
     label_et = _as_new_york_index(pd.DatetimeIndex([label]))[0]
     if timeframe == "weekly":
-        # W-FRI labels a bar with its Friday end date.
-        return label_et.normalize() + pd.Timedelta(hours=16) + CLOSE_GRACE
+        # W-FRI labels a bar with its Friday end date, which may be an early
+        # close or a holiday.  Confirmation belongs to the last actual session.
+        required = last_required_trading_date(label_et, timeframe)
+        return nyse_session(required).close + CLOSE_GRACE
     if timeframe == "monthly":
         # Wait through the first following trading day close. This deliberately
         # favours a conservative confirmation over a still-changing month-end.
-        return _next_trading_day(label_et).normalize() + pd.Timedelta(hours=16) + CLOSE_GRACE
+        return nyse_session(_next_trading_day(label_et)).close + CLOSE_GRACE
     raise ValueError(f"Unsupported long timeframe: {timeframe}")
 
 

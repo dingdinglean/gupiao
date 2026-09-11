@@ -70,6 +70,17 @@ def complete_rth_hourly(day: str, *, close: float = 101.0) -> pd.DataFrame:
     return pd.concat([frame, extras]).sort_index()
 
 
+def early_close_rth_hourly(day: str, *, close: float = 101.0) -> pd.DataFrame:
+    """XNYS Black Friday-style 09:30--13:00 session with excluded extras."""
+    rth = pd.date_range(f"{day} 09:30", periods=4, freq="h", tz=ET)
+    frame = ohlcv(rth, high=102.0, low=98.0, close=close, volume=100.0)
+    extras = ohlcv(pd.DatetimeIndex([
+        pd.Timestamp(f"{day} 08:30", tz=ET),
+        pd.Timestamp(f"{day} 13:30", tz=ET),
+    ]), high=9_999.0, low=-999.0, close=1.0, volume=9_999.0)
+    return pd.concat([frame, extras]).sort_index()
+
+
 class LongTimeframeRadarTests(unittest.TestCase):
     def test_fetch_daily_requests_prepost_false_and_rejects_intraday_extended_row(self):
         calls: dict = {}
@@ -218,6 +229,42 @@ class LongTimeframeRadarTests(unittest.TestCase):
         weekly_diagnostic = next(item for item in diagnostics if item.timeframe == "weekly")
         self.assertEqual(signals, [])
         self.assertEqual(weekly_diagnostic.daily_context_source, "stale_rejected")
+
+    def test_early_close_final_weekly_session_can_use_rth_fallback(self):
+        now = datetime(2026, 11, 27, 13, 20, tzinfo=ET)
+        weekly = bars(pd.date_range(end="2026-11-27", periods=121, freq="W-FRI", tz=ET), final_dxdx=True)
+        monthly = monthly_bars()
+        diagnostics: list = []
+        with patch("long_screener.resample_to_weekly", return_value=weekly) as weekly_resample, patch("long_screener.resample_to_monthly", return_value=monthly), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, _ = long_screener._signals_from_daily(
+                "META", daily_history_through("2026-11-26"), now,
+                hourly_provider=lambda: early_close_rth_hourly("2026-11-27", close=101.25), diagnostics=diagnostics,
+            )
+        weekly_diagnostic = next(item for item in diagnostics if item.timeframe == "weekly")
+        self.assertEqual([item.timeframe for item in signals], ["weekly"])
+        self.assertEqual(weekly_diagnostic.last_required_trading_date.date().isoformat(), "2026-11-27")
+        self.assertEqual(weekly_diagnostic.daily_context_source, "rth_hourly_fallback")
+        self.assertTrue(weekly_diagnostic.completeness_passed)
+        self.assertGreaterEqual(weekly_resample.call_count, 2)
+
+    def test_early_close_final_monthly_session_can_use_rth_fallback(self):
+        # 2019-11-29 was Black Friday and that month's final NYSE session.
+        now = datetime(2019, 12, 2, 16, 20, tzinfo=ET)
+        weekly = bars(pd.date_range(end="2019-12-06", periods=121, freq="W-FRI", tz=ET))
+        monthly = bars(pd.date_range(end="2019-11-30", periods=121, freq="ME", tz=ET), final_dxdx=True)
+        december_push = ohlcv(pd.DatetimeIndex([pd.Timestamp("2019-12-02", tz=ET)]), close=150.0, volume=100.0)
+        diagnostics: list = []
+        with patch("long_screener.resample_to_weekly", return_value=weekly), patch("long_screener.resample_to_monthly", return_value=monthly) as monthly_resample, patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, _ = long_screener._signals_from_daily(
+                "INTC", pd.concat([daily_history_through("2019-11-28"), december_push]).sort_index(), now,
+                hourly_provider=lambda: early_close_rth_hourly("2019-11-29", close=101.25), diagnostics=diagnostics,
+            )
+        monthly_diagnostic = next(item for item in diagnostics if item.timeframe == "monthly")
+        self.assertEqual([item.timeframe for item in signals], ["monthly"])
+        self.assertEqual(monthly_diagnostic.last_required_trading_date.date().isoformat(), "2019-11-29")
+        self.assertEqual(monthly_diagnostic.daily_context_source, "rth_hourly_fallback")
+        self.assertEqual(signals[0].push_price, 150.0)
+        self.assertGreaterEqual(monthly_resample.call_count, 2)
 
     def test_month_end_missing_daily_rejects_monthly_bar(self):
         now = datetime(2026, 9, 1, 16, 20, tzinfo=ET)
