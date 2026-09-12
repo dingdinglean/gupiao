@@ -34,6 +34,9 @@ class Signal:
     close: float
     blue_above_yellow: bool
     detected_at: datetime
+    scan_mode: str = "post_close"
+    daily_data_source: str = "yahoo_official_daily"
+    h4_context_source: str = "yahoo_daily"
 
     def signal_keys(self) -> list[tuple[str, datetime]]:
         keys: list[tuple[str, datetime]] = []
@@ -212,26 +215,32 @@ def _check_symbol_with_diagnostic(
     if not is_us_listed_stock(symbol):
         return None, None, False
     try:
-        daily_raw = fetch_daily(symbol, period="3y")
+        # This is the sole authoritative daily signal source.  It is never
+        # replaced by an hourly reconstruction, even when Yahoo finalises 1H
+        # before its 1D endpoint.
+        daily_raw = fetch_daily(symbol, period="max")
         hourly = fetch_hourly(symbol, period="730d")
-        daily = add_all_indicators(daily_raw)
+        official_daily = add_all_indicators(daily_raw)
         h4 = add_all_indicators(resample_to_4h(hourly))
     except Exception as exc:
         log.warning("%s data error: %s", symbol, exc)
         raise
-    if len(daily) < 120 or len(h4) < 120:
+    if len(official_daily) < 120 or len(h4) < 120:
         raise ValueError("insufficient daily or 4H history")
 
-    daily_latest = latest_complete_daily(daily, now)
-    daily_time, daily_row = daily_latest if daily_latest is not None else (None, None)
+    # Keep official daily signal state immutable through the whole 4H path.
+    official_latest = latest_complete_daily(official_daily, now)
+    official_time, official_row = official_latest if official_latest is not None else (None, None)
     h4_match = current_day_h4_dxdx(h4, now)
     daily_context_source = "yahoo_daily"
+    h4_daily_context = official_daily
+    context_time, context_row = official_time, official_row
 
     # When Yahoo's completed 1D endpoint trails its completed RTH 1H endpoint,
     # reconstruct only today's daily bar from those already-RTH-filtered hourly
     # bars.  Then run the *same* existing daily indicator pipeline over the
     # amended history.  No 4H/DXDX math is changed.
-    if h4_match is not None and (daily_time is None or _session_date(daily_time) != _session_date(h4_match[0])):
+    if h4_match is not None and (context_time is None or _session_date(context_time) != _session_date(h4_match[0])):
         fallback_daily = rth_hourly_to_daily(
             hourly,
             _session_date(h4_match[0]),
@@ -239,10 +248,10 @@ def _check_symbol_with_diagnostic(
             close_grace=CLOSE_GRACE,
         )
         if not fallback_daily.empty:
-            daily = add_all_indicators(_replace_session_daily_bar(daily_raw, fallback_daily))
-            daily_latest = latest_complete_daily(daily, now)
-            daily_time, daily_row = daily_latest if daily_latest is not None else (None, None)
-            if daily_time is not None and _session_date(daily_time) == _session_date(h4_match[0]):
+            h4_daily_context = add_all_indicators(_replace_session_daily_bar(daily_raw, fallback_daily))
+            context_latest = latest_complete_daily(h4_daily_context, now)
+            context_time, context_row = context_latest if context_latest is not None else (None, None)
+            if context_time is not None and _session_date(context_time) == _session_date(h4_match[0]):
                 daily_context_source = "rth_hourly_fallback"
             else:
                 daily_context_source = "stale_rejected"
@@ -254,15 +263,15 @@ def _check_symbol_with_diagnostic(
             symbol,
             h4_match[0],
             h4_match[1],
-            daily_time,
-            daily_row,
+            context_time,
+            context_row,
             require_strict_separation=require_strict_separation,
             daily_context_source=daily_context_source,
         )
         if h4_match is not None
         else None
     )
-    if daily_latest is None:
+    if context_time is None and h4_match is not None:
         if h4_match is not None:
             log.warning(
                 "%s suppressing 4H DXDX at %s: no completed daily bar is available",
@@ -272,7 +281,7 @@ def _check_symbol_with_diagnostic(
         return None, diagnostic, h4_match is not None
 
     stale_daily_h4 = False
-    if h4_match is not None and _session_date(daily_time) != _session_date(h4_match[0]):
+    if h4_match is not None and _session_date(context_time) != _session_date(h4_match[0]):
         # A post-close 4H signal cannot borrow yesterday's daily EMA channel.
         # Yahoo occasionally finalises hourly data before its daily response.
         # Suppress only the A/S 4H portion and let a later run evaluate it once
@@ -282,31 +291,36 @@ def _check_symbol_with_diagnostic(
             "%s suppressing 4H DXDX at %s: latest completed daily bar %s is stale",
             symbol,
             h4_match[0].isoformat(),
-            daily_time.isoformat(),
+            context_time.isoformat(),
         )
         h4_match = None
 
-    bullish = _trend_is_bullish(daily_row, require_strict_separation)
-    if not bullish:
-        return None, diagnostic, stale_daily_h4
-
-    daily_dxdx = bool(daily_row.get("DXDX", False))
-    h4_dxdx = h4_match is not None
+    # A post-close daily alert belongs only to today's *official* 1D bar. A
+    # historical official daily signal is left for confirmation catch-up.
+    today = _as_new_york_time(now).normalize()
+    official_today = official_time is not None and _session_date(official_time) == today
+    daily_bullish = bool(official_today and official_row is not None and _trend_is_bullish(official_row, require_strict_separation))
+    daily_dxdx = bool(official_today and daily_bullish and official_row is not None and official_row.get("DXDX", False))
+    h4_bullish = bool(h4_match is not None and context_row is not None and _trend_is_bullish(context_row, require_strict_separation))
+    h4_dxdx = h4_match is not None and h4_bullish
     if not daily_dxdx and not h4_dxdx:
         return None, diagnostic, stale_daily_h4
 
-    level = "S" if daily_dxdx and h4_dxdx else ("A" if h4_dxdx else "B")
+    same_session = daily_dxdx and h4_dxdx and official_time is not None and _session_date(official_time) == _session_date(h4_match[0])
+    level = "S" if same_session else ("A" if h4_dxdx else "B")
     h4_time = h4_match[0].to_pydatetime() if h4_match else None
     return Signal(
         symbol=symbol,
         signal_level=level,
         daily_dxdx=daily_dxdx,
         h4_dxdx=h4_dxdx,
-        daily_signal_time=daily_time.to_pydatetime() if daily_dxdx else None,
+        daily_signal_time=official_time.to_pydatetime() if daily_dxdx else None,
         h4_signal_time=h4_time,
-        close=float(daily_row["close"]),
-        blue_above_yellow=True,
+        close=float((context_row if h4_dxdx else official_row)["close"]),
+        blue_above_yellow=h4_bullish if h4_dxdx else daily_bullish,
         detected_at=_as_new_york_time(now).to_pydatetime(),
+        daily_data_source="yahoo_official_daily",
+        h4_context_source=daily_context_source,
     ), diagnostic, stale_daily_h4
 
 

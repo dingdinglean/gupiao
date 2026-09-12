@@ -8,6 +8,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
+
 try:
     from dotenv import load_dotenv
 except ImportError:  # Test/minimal environments can still use process env.
@@ -15,13 +17,16 @@ except ImportError:  # Test/minimal environments can still use process env.
         return False
 
 from notifier import format_signals_email, send_email
+from indicators import compute_macd_divergence
 from screener import H4Diagnostic, ScanStats, Signal, run_screener
+from session_calendar import nyse_session, previous_nyse_trading_day
 from state import AlertState
 from universe import get_universe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("dxdx-radar")
 OUTPUT_DIR = Path("output")
+CONFIRM_LOOKBACK_SESSIONS = 5
 
 
 def load_config(*, require_smtp: bool = False) -> dict:
@@ -61,7 +66,7 @@ def write_reports(
     diagnostics: list[H4Diagnostic] | None = None,
 ) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    fields = ["symbol", "signal_level", "daily_dxdx", "h4_dxdx", "daily_signal_time", "h4_signal_time", "close", "blue_above_yellow", "detected_at"]
+    fields = ["symbol", "signal_level", "daily_dxdx", "h4_dxdx", "daily_signal_time", "h4_signal_time", "close", "blue_above_yellow", "detected_at", "scan_mode", "daily_data_source", "h4_context_source"]
     with (OUTPUT_DIR / "dxdx_signals.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -129,10 +134,84 @@ def send_test_email(cfg: dict) -> None:
     send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], "【美股双周期抄底雷达】Gmail 连通性测试", f"Gmail SMTP 连通性测试成功。\n时间：{now:%Y-%m-%d %H:%M:%S}\n")
 
 
+def confirmation_session_times(now: datetime, count: int = CONFIRM_LOOKBACK_SESSIONS) -> list[datetime]:
+    moment = pd.Timestamp(now)
+    moment = moment.tz_convert("America/New_York") if moment.tzinfo else moment.tz_localize("America/New_York")
+    day = moment.normalize()
+    bounds = nyse_session(day)
+    if bounds is None or moment < bounds.close + pd.Timedelta(minutes=20):
+        day = previous_nyse_trading_day(day - pd.Timedelta(days=1))
+    result = []
+    for _ in range(count):
+        result.append((nyse_session(day).close + pd.Timedelta(minutes=20)).to_pydatetime())
+        day = previous_nyse_trading_day(day - pd.Timedelta(days=1))
+    return result
+
+
+def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool = False, now: datetime | None = None) -> tuple[list[Signal], ScanStats, bool]:
+    """Official-1D catch-up for five completed XNYS sessions.
+
+    ``run_screener`` is evaluated at each session close, so its existing
+    session-aware 4H lookup is historical rather than tied to wall-clock now.
+    """
+    all_signals: list[Signal] = []
+    all_diagnostics: list[H4Diagnostic] = []
+    total = ScanStats(pool_count=0)
+    for session_now in confirmation_session_times(now or datetime.now().astimezone()):
+        signals, stats = run_screener(symbols, require_strict_separation=cfg["strict_separation"], max_workers=cfg["max_workers"], now=session_now, diagnostics=all_diagnostics)
+        for signal in signals:
+            signal.scan_mode = "official_daily_confirmation"
+        all_signals.extend(signals)
+        total.pool_count = stats.pool_count
+        total.fetched_count += stats.fetched_count
+        total.failed_count += stats.failed_count
+        total.stale_daily_h4_count += stats.stale_daily_h4_count
+    new_signals = state.filter_new(all_signals)
+    started = now or datetime.now()
+    if dry_run:
+        write_reports(new_signals, total, email_sent=False, detected_at=started, diagnostics=all_diagnostics)
+        return new_signals, total, False
+    if not new_signals:
+        write_reports([], total, email_sent=False, detected_at=started, diagnostics=all_diagnostics)
+        state.save()
+        return [], total, False
+    require_smtp_config(cfg)
+    subject, body = format_signals_email(new_signals, pool_count=total.pool_count, scan_time=started)
+    send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], subject, body)
+    for signal in new_signals:
+        state.mark_sent(signal)
+    state.save()
+    write_reports(new_signals, total, email_sent=True, detected_at=started, diagnostics=all_diagnostics)
+    return new_signals, total, True
+
+
+def replay_daily(symbol: str, date: str) -> int:
+    """Read-only Yahoo adjusted/raw history matrix for deferred regressions."""
+    import tempfile
+    import yfinance as yf
+    yf.set_tz_cache_location(tempfile.mkdtemp(prefix="gupiao-replay-"))
+    target = pd.Timestamp(date, tz="America/New_York").normalize()
+    rows = []
+    for adjusted in (True, False):
+        for period in ("3y", "5y", "max"):
+            daily = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=adjusted, prepost=False).rename(columns=str.lower)
+            daily = daily.dropna(subset=["open", "high", "low", "close"])
+            match = daily.loc[pd.DatetimeIndex(daily.index).tz_convert("America/New_York").normalize() == target] if not daily.empty else daily
+            if match.empty:
+                rows.append({"symbol": symbol, "date": date, "auto_adjust": adjusted, "period": period, "status": "pending_official_daily_data"})
+            else:
+                row = compute_macd_divergence(daily).loc[match.index[-1]]
+                rows.append({"symbol": symbol, "date": date, "auto_adjust": adjusted, "period": period, "status": "ok", **{key: row.get(key) for key in ("open", "high", "low", "close", "DIF", "DEA", "MACD_bar", "N1", "MM1", "CC1", "CC2", "CC3", "DIFL1", "DIFL2", "DIFL3", "AAA", "BBB", "CCC", "JJJ", "DXDX")}})
+    for row in rows: print(row)
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="US daily/4H DXDX pullback radar")
     parser.add_argument("--dry-run", action="store_true", help="scan without emailing or updating alert state")
     parser.add_argument("--test-email", action="store_true", help="send one Gmail SMTP connectivity test")
+    parser.add_argument("--confirm-daily", action="store_true", help="confirm official daily DXDX over five XNYS sessions")
+    parser.add_argument("--replay-daily", nargs=2, metavar=("SYMBOL", "YYYY-MM-DD"), help="read-only official Yahoo daily matrix")
     return parser.parse_args()
 
 
@@ -141,6 +220,12 @@ def main() -> None:
     config = load_config(require_smtp=args.test_email)
     if args.test_email:
         send_test_email(config)
+        return
+    if args.replay_daily:
+        replay_daily(*args.replay_daily)
+        return
+    if args.confirm_daily:
+        run_confirmation(config, get_universe(), AlertState(), dry_run=args.dry_run)
         return
     run_once(config, get_universe(), AlertState(), dry_run=args.dry_run)
 

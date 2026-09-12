@@ -192,6 +192,18 @@ def compute_macd_divergence(df: pd.DataFrame) -> pd.DataFrame:
     out["DIF"] = D
     out["DEA"] = A
     out["MACD_bar"] = M
+    # Bottom-side values are emitted verbatim for independent formula parity
+    # and daily-source diagnostics.  They do not add any signal condition.
+    out["N1"] = N1
+    out["MM1"] = MM1
+    out["CC1"] = CC1
+    out["CC2"] = CC2
+    out["CC3"] = CC3
+    out["DIFL1"] = DIFL1
+    out["DIFL2"] = DIFL2
+    out["DIFL3"] = DIFL3
+    out["AAA"] = _bfalse(AAA)
+    out["BBB"] = _bfalse(BBB)
     out["LLL"] = _bfalse(LLL)
     # Keep the exact formula above, but surface its two bottom-side
     # intermediates for an auditable 4H candidate trace.

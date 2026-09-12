@@ -4,10 +4,21 @@ on:
   schedule:
     # Weekdays, after the US regular session and Yahoo finalisation window.
     - cron: "30 22 * * 1-5"
+    - cron: "0 8 * * 2-6"
   workflow_dispatch:
     inputs:
       test_email:
         description: Send Gmail SMTP connectivity test only
+        required: false
+        type: boolean
+        default: false
+      confirm_daily:
+        description: Run official daily confirmation
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: Do not send mail or update state
         required: false
         type: boolean
         default: false
@@ -47,6 +58,8 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.test_email }}" = "true" ]; then
             python main.py --test-email
+          elif [ "${{ github.event.schedule }}" = "0 8 * * 2-6" ] || [ "${{ github.event.inputs.confirm_daily }}" = "true" ]; then
+            python main.py --confirm-daily ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
           else
             python main.py
           fi
