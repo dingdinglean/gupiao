@@ -83,6 +83,13 @@ def write_reports(
             item.to_dict()
             for item in sorted(diagnostics or [], key=lambda item: (item.h4_signal_time, item.symbol))
         )
+    daily_fields = ["symbol", "session", "scan_mode", "official_daily_fresh", "official_daily_source", "official_history_bars", "open", "high", "low", "close", "DIFF", "DEA", "MACD", "N1", "MM1", "CC1", "CC2", "CC3", "DIFL1", "DIFL2", "DIFL3", "AAA", "BBB", "CCC", "JJJ_prev", "JJJ", "DXDX", "matched_h4_same_session", "final_level"]
+    with (OUTPUT_DIR / "daily_dxdx_diagnostics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=daily_fields); writer.writeheader()
+        # A daily row is intentionally emitted only from authoritative daily
+        # data; H4 fallback values remain context-only and never fill DXDX.
+        for item in diagnostics or []:
+            writer.writerow({"symbol": item.symbol, "session": item.daily_bar_date.isoformat() if item.daily_bar_date else "", "scan_mode": "post_close", "official_daily_fresh": item.daily_context_source == "yahoo_daily", "official_daily_source": "yahoo_official_daily", "close": item.daily_close, "DIFF": item.dif, "DEA": item.dea, "MACD": item.macd_bar, "CCC": item.ccc, "JJJ": item.jjj, "DXDX": item.dxdx, "matched_h4_same_session": item.daily_fresh_for_h4, "final_level": ""})
     counts = {level: sum(signal.signal_level == level for signal in signals) for level in ("S", "A", "B")}
     lines = [
         "【美股双周期抄底雷达】",

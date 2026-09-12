@@ -78,4 +78,5 @@ jobs:
             output/dxdx_signals.csv
             output/dxdx_report.txt
             output/h4_dxdx_diagnostics.csv
+            output/daily_dxdx_diagnostics.csv
           if-no-files-found: warn
