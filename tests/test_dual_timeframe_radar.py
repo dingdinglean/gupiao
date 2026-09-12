@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -15,7 +15,7 @@ import main
 import notifier
 import screener
 import universe
-from screener import ScanStats, Signal
+from screener import DailyDiagnostic, ScanStats, Signal
 from state import AlertState
 from universe import combine_us_universe, is_us_listed_stock
 
@@ -344,6 +344,51 @@ class DualTimeframeRadarTests(unittest.TestCase):
         self.assertEqual(signals, [])
         self.assertEqual(stats.failed_count, 1)
         self.assertEqual(stats.fetched_count, 1)
+
+    def test_confirmation_fetches_each_source_once_and_reuses_it_for_sessions(self):
+        daily = daily_frame(dxdx=True)
+        daily[["DIF", "DEA", "MACD_bar", "N1", "MM1"]] = [1.1, 0.9, 0.4, 3, 7]
+        h4 = h4_frame(second_today=True)
+        sessions = [pd.Timestamp(NOW - pd.Timedelta(days=offset)) for offset in range(5)]
+        with patch("screener.fetch_daily", return_value=daily) as daily_fetch, patch("screener.fetch_hourly", return_value=pd.DataFrame()) as hourly_fetch, patch("screener.resample_to_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+            signals, diagnostics = screener.check_symbol_confirmation("AMD", sessions)
+        self.assertEqual(daily_fetch.call_count, 1)
+        self.assertEqual(hourly_fetch.call_count, 1)
+        self.assertEqual(len(diagnostics), 5)
+        self.assertEqual(diagnostics[0].official_daily_source, "yahoo_official_daily")
+        self.assertTrue(diagnostics[0].DXDX)
+        self.assertEqual(signals[0].signal_level, "S")
+
+    def test_confirmation_daily_diagnostic_never_uses_h4_fallback(self):
+        daily = daily_frame(dxdx=False)
+        h4 = h4_frame(second_today=True)
+        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_hourly", return_value=pd.DataFrame()), patch("screener.resample_to_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+            signals, diagnostics = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)])
+        self.assertEqual(signals, [])
+        self.assertFalse(diagnostics[0].DXDX)
+        self.assertTrue(diagnostics[0].matched_h4_same_session)
+        self.assertEqual(diagnostics[0].official_daily_source, "yahoo_official_daily")
+
+    def test_dry_run_never_saves_or_marks_state_in_both_modes(self):
+        cfg = {"strict_separation": False, "max_workers": 1}
+        state = MagicMock()
+        state.filter_new.return_value = []
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)), patch("main.run_screener", return_value=([], ScanStats(pool_count=1))), patch("main.run_confirmation_screener", return_value=([], ScanStats(pool_count=1), [])):
+            main.run_once(cfg, ["AMD"], state, dry_run=True)
+            main.run_confirmation(cfg, ["AMD"], state, dry_run=True, now=NOW)
+        state.save.assert_not_called()
+        state.mark_sent.assert_not_called()
+
+    def test_daily_diagnostic_artifact_is_independent_from_h4_diagnostic(self):
+        daily = DailyDiagnostic("AMD", NOW, "official_daily_confirmation", True, "yahoo_official_daily", 120,
+            100.0, 101.0, 99.0, 100.5, 1.0, 0.9, 0.2, 3.0, 5.0, 1.0, 0.0, 0.0, -1.0, -2.0, -3.0,
+            True, False, True, False, True, True, True, "S")
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)):
+            main.write_reports([], ScanStats(pool_count=1), email_sent=False, detected_at=NOW, daily_diagnostics=[daily])
+            rows = list(pd.read_csv(Path(directory) / "daily_dxdx_diagnostics.csv").to_dict("records"))
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["DIFF"], 1.0)
+        self.assertEqual(rows[0]["official_daily_source"], "yahoo_official_daily")
 
     def test_artifacts_have_required_columns(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)):

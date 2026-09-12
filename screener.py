@@ -175,9 +175,9 @@ def h4_dxdx_for_session(df: pd.DataFrame, session_date: pd.Timestamp) -> tuple[p
     return matches[-1] if matches else None
 
 
-def _daily_diagnostic(symbol: str, session: pd.Timestamp, row: pd.Series | None, history_bars: int, h4_match: tuple[pd.Timestamp, pd.Series] | None, level: str, mode: str) -> DailyDiagnostic:
+def _daily_diagnostic(symbol: str, session: pd.Timestamp, row: pd.Series | None, previous_row: pd.Series | None, history_bars: int, h4_match: tuple[pd.Timestamp, pd.Series] | None, level: str, mode: str) -> DailyDiagnostic:
     number = lambda name: _number(row, name) if row is not None else None
-    previous_jjj = False
+    previous_jjj = bool(previous_row.get("JJJ", False)) if previous_row is not None else False
     return DailyDiagnostic(symbol, _session_date(session).to_pydatetime(), mode, row is not None, "yahoo_official_daily" if row is not None else "missing", history_bars,
         *[number(key) for key in ("open","high","low","close","DIF","DEA","MACD_bar","N1","MM1","CC1","CC2","CC3","DIFL1","DIFL2","DIFL3")],
         *[bool(row.get(key, False)) if row is not None else False for key in ("AAA","BBB","CCC")], previous_jjj, bool(row.get("JJJ", False)) if row is not None else False, bool(row.get("DXDX", False)) if row is not None else False, h4_match is not None, level)
@@ -193,12 +193,14 @@ def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], *,
     index_dates = pd.DatetimeIndex(daily.index).tz_convert(NEW_YORK).normalize()
     for session in session_dates:
         positions = [i for i, day in enumerate(index_dates) if day == _session_date(session)]
-        row = daily.iloc[positions[-1]] if positions else None
+        position = positions[-1] if positions else None
+        row = daily.iloc[position] if position is not None else None
+        previous_row = daily.iloc[position - 1] if position is not None and position > 0 else None
         h4_match = h4_dxdx_for_session(h4, session)
         daily_ok = bool(row is not None and row.get("DXDX", False) and _trend_is_bullish(row, require_strict_separation))
         h4_ok = bool(h4_match is not None and row is not None and _trend_is_bullish(row, require_strict_separation))
         level = "S" if daily_ok and h4_ok else ("B" if daily_ok else "")
-        diagnostics.append(_daily_diagnostic(symbol, session, row, len(daily), h4_match, level, "official_daily_confirmation"))
+        diagnostics.append(_daily_diagnostic(symbol, session, row, previous_row, len(daily), h4_match, level, "official_daily_confirmation"))
         if level:
             signals.append(Signal(symbol, level, True, h4_ok, _session_date(session).to_pydatetime(), h4_match[0].to_pydatetime() if h4_ok else None, float(row["close"]), True, datetime.now(tz=NEW_YORK), scan_mode="official_daily_confirmation", daily_data_source="yahoo_official_daily", h4_context_source="yahoo_daily"))
     return signals, diagnostics

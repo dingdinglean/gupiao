@@ -180,7 +180,7 @@ def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_ru
     for signal in new_signals:
         state.mark_sent(signal)
     state.save()
-    write_reports(new_signals, total, email_sent=True, detected_at=started, diagnostics=all_diagnostics)
+    write_reports(new_signals, total, email_sent=True, detected_at=started, diagnostics=all_diagnostics, daily_diagnostics=daily_rows)
     return new_signals, total, True
 
 
