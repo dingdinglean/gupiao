@@ -39,7 +39,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Restore alert state
-        if: github.event.inputs.test_email != 'true'
+        if: github.event.inputs.test_email != 'true' && github.event.inputs.dry_run != 'true'
         uses: actions/cache/restore@v4
         with:
           path: alert_state.json
@@ -64,7 +64,7 @@ jobs:
             python main.py
           fi
       - name: Save alert state
-        if: always() && github.event.inputs.test_email != 'true' && hashFiles('alert_state.json') != ''
+        if: always() && github.event.inputs.test_email != 'true' && github.event.inputs.dry_run != 'true' && hashFiles('alert_state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: alert_state.json

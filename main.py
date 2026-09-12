@@ -18,7 +18,7 @@ except ImportError:  # Test/minimal environments can still use process env.
 
 from notifier import format_signals_email, send_email
 from indicators import compute_macd_divergence
-from screener import H4Diagnostic, ScanStats, Signal, run_screener
+from screener import DailyDiagnostic, H4Diagnostic, ScanStats, Signal, run_confirmation_screener, run_screener
 from session_calendar import nyse_session, previous_nyse_trading_day
 from state import AlertState
 from universe import get_universe
@@ -64,6 +64,7 @@ def write_reports(
     email_sent: bool,
     detected_at: datetime,
     diagnostics: list[H4Diagnostic] | None = None,
+    daily_diagnostics: list[DailyDiagnostic] | None = None,
 ) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     fields = ["symbol", "signal_level", "daily_dxdx", "h4_dxdx", "daily_signal_time", "h4_signal_time", "close", "blue_above_yellow", "detected_at", "scan_mode", "daily_data_source", "h4_context_source"]
@@ -86,10 +87,7 @@ def write_reports(
     daily_fields = ["symbol", "session", "scan_mode", "official_daily_fresh", "official_daily_source", "official_history_bars", "open", "high", "low", "close", "DIFF", "DEA", "MACD", "N1", "MM1", "CC1", "CC2", "CC3", "DIFL1", "DIFL2", "DIFL3", "AAA", "BBB", "CCC", "JJJ_prev", "JJJ", "DXDX", "matched_h4_same_session", "final_level"]
     with (OUTPUT_DIR / "daily_dxdx_diagnostics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=daily_fields); writer.writeheader()
-        # A daily row is intentionally emitted only from authoritative daily
-        # data; H4 fallback values remain context-only and never fill DXDX.
-        for item in diagnostics or []:
-            writer.writerow({"symbol": item.symbol, "session": item.daily_bar_date.isoformat() if item.daily_bar_date else "", "scan_mode": "post_close", "official_daily_fresh": item.daily_context_source == "yahoo_daily", "official_daily_source": "yahoo_official_daily", "close": item.daily_close, "DIFF": item.dif, "DEA": item.dea, "MACD": item.macd_bar, "CCC": item.ccc, "JJJ": item.jjj, "DXDX": item.dxdx, "matched_h4_same_session": item.daily_fresh_for_h4, "final_level": ""})
+        writer.writerows(item.to_dict() for item in daily_diagnostics or [])
     counts = {level: sum(signal.signal_level == level for signal in signals) for level in ("S", "A", "B")}
     lines = [
         "【美股双周期抄底雷达】",
@@ -116,6 +114,9 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool 
         diagnostics=diagnostics,
     )
     new_signals = state.filter_new(signals)
+    if dry_run:
+        write_reports(new_signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
+        return new_signals, stats, False
     if not new_signals:
         log.info("No new DXDX signals; email skipped.")
         write_reports(signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
@@ -161,25 +162,16 @@ def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_ru
     ``run_screener`` is evaluated at each session close, so its existing
     session-aware 4H lookup is historical rather than tied to wall-clock now.
     """
-    all_signals: list[Signal] = []
+    sessions = [pd.Timestamp(item) for item in confirmation_session_times(now or datetime.now().astimezone())]
+    all_signals, total, daily_rows = run_confirmation_screener(symbols, sessions, require_strict_separation=cfg["strict_separation"], max_workers=cfg["max_workers"])
     all_diagnostics: list[H4Diagnostic] = []
-    total = ScanStats(pool_count=0)
-    for session_now in confirmation_session_times(now or datetime.now().astimezone()):
-        signals, stats = run_screener(symbols, require_strict_separation=cfg["strict_separation"], max_workers=cfg["max_workers"], now=session_now, diagnostics=all_diagnostics)
-        for signal in signals:
-            signal.scan_mode = "official_daily_confirmation"
-        all_signals.extend(signals)
-        total.pool_count = stats.pool_count
-        total.fetched_count += stats.fetched_count
-        total.failed_count += stats.failed_count
-        total.stale_daily_h4_count += stats.stale_daily_h4_count
     new_signals = state.filter_new(all_signals)
     started = now or datetime.now()
-    if dry_run:
-        write_reports(new_signals, total, email_sent=False, detected_at=started, diagnostics=all_diagnostics)
+    if dry_run:  # unreachable: retained guard
+        write_reports(new_signals, total, email_sent=False, detected_at=started, diagnostics=all_diagnostics, daily_diagnostics=daily_rows)
         return new_signals, total, False
     if not new_signals:
-        write_reports([], total, email_sent=False, detected_at=started, diagnostics=all_diagnostics)
+        write_reports([], total, email_sent=False, detected_at=started, diagnostics=all_diagnostics, daily_diagnostics=daily_rows)
         state.save()
         return [], total, False
     require_smtp_config(cfg)

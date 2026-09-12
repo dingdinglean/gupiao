@@ -88,6 +88,26 @@ class H4Diagnostic:
 
 
 @dataclass
+class DailyDiagnostic:
+    symbol: str
+    session: datetime
+    scan_mode: str
+    official_daily_fresh: bool
+    official_daily_source: str
+    official_history_bars: int
+    open: float | None; high: float | None; low: float | None; close: float | None
+    DIFF: float | None; DEA: float | None; MACD: float | None
+    N1: float | None; MM1: float | None; CC1: float | None; CC2: float | None; CC3: float | None
+    DIFL1: float | None; DIFL2: float | None; DIFL3: float | None
+    AAA: bool; BBB: bool; CCC: bool; JJJ_prev: bool; JJJ: bool; DXDX: bool
+    matched_h4_same_session: bool
+    final_level: str
+
+    def to_dict(self) -> dict:
+        value = asdict(self); value["session"] = self.session.isoformat(); return value
+
+
+@dataclass
 class ScanStats:
     pool_count: int
     fetched_count: int = 0
@@ -146,6 +166,54 @@ def current_day_h4_dxdx(df: pd.DataFrame, now: datetime | pd.Timestamp | None = 
         if bool(row.get("DXDX", False)):
             return pd.Timestamp(df.index[position]), row
     return None
+
+
+def h4_dxdx_for_session(df: pd.DataFrame, session_date: pd.Timestamp) -> tuple[pd.Timestamp, pd.Series] | None:
+    """Latest DXDX 4H bar inside one already-completed XNYS session."""
+    target = _session_date(session_date)
+    matches = [(pd.Timestamp(ts), row) for ts, row in df.iterrows() if _session_date(ts) == target and bool(row.get("DXDX", False))]
+    return matches[-1] if matches else None
+
+
+def _daily_diagnostic(symbol: str, session: pd.Timestamp, row: pd.Series | None, history_bars: int, h4_match: tuple[pd.Timestamp, pd.Series] | None, level: str, mode: str) -> DailyDiagnostic:
+    number = lambda name: _number(row, name) if row is not None else None
+    previous_jjj = False
+    return DailyDiagnostic(symbol, _session_date(session).to_pydatetime(), mode, row is not None, "yahoo_official_daily" if row is not None else "missing", history_bars,
+        *[number(key) for key in ("open","high","low","close","DIF","DEA","MACD_bar","N1","MM1","CC1","CC2","CC3","DIFL1","DIFL2","DIFL3")],
+        *[bool(row.get(key, False)) if row is not None else False for key in ("AAA","BBB","CCC")], previous_jjj, bool(row.get("JJJ", False)) if row is not None else False, bool(row.get("DXDX", False)) if row is not None else False, h4_match is not None, level)
+
+
+def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], *, require_strict_separation: bool = False) -> tuple[list[Signal], list[DailyDiagnostic]]:
+    """Fetch each source once, then evaluate all confirmation sessions locally."""
+    if not is_us_listed_stock(symbol): return [], []
+    raw = fetch_daily(symbol, period="max")
+    hourly = fetch_hourly(symbol, period="730d")
+    daily, h4 = add_all_indicators(raw), add_all_indicators(resample_to_4h(hourly))
+    signals: list[Signal] = []; diagnostics: list[DailyDiagnostic] = []
+    index_dates = pd.DatetimeIndex(daily.index).tz_convert(NEW_YORK).normalize()
+    for session in session_dates:
+        positions = [i for i, day in enumerate(index_dates) if day == _session_date(session)]
+        row = daily.iloc[positions[-1]] if positions else None
+        h4_match = h4_dxdx_for_session(h4, session)
+        daily_ok = bool(row is not None and row.get("DXDX", False) and _trend_is_bullish(row, require_strict_separation))
+        h4_ok = bool(h4_match is not None and row is not None and _trend_is_bullish(row, require_strict_separation))
+        level = "S" if daily_ok and h4_ok else ("B" if daily_ok else "")
+        diagnostics.append(_daily_diagnostic(symbol, session, row, len(daily), h4_match, level, "official_daily_confirmation"))
+        if level:
+            signals.append(Signal(symbol, level, True, h4_ok, _session_date(session).to_pydatetime(), h4_match[0].to_pydatetime() if h4_ok else None, float(row["close"]), True, datetime.now(tz=NEW_YORK), scan_mode="official_daily_confirmation", daily_data_source="yahoo_official_daily", h4_context_source="yahoo_daily"))
+    return signals, diagnostics
+
+
+def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timestamp], *, max_workers: int = 6, require_strict_separation: bool = False) -> tuple[list[Signal], ScanStats, list[DailyDiagnostic]]:
+    allowed = [s for s in symbols if is_us_listed_stock(s)]; stats = ScanStats(pool_count=len(allowed)); signals=[]; diagnostics=[]
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(check_symbol_confirmation, symbol, session_dates, require_strict_separation=require_strict_separation): symbol for symbol in allowed}
+        for future in as_completed(futures):
+            try:
+                found, rows = future.result(); signals.extend(found); diagnostics.extend(rows); stats.fetched_count += 1
+            except Exception as exc:
+                stats.failed_count += 1; log.warning("%s skipped: %s", futures[future], exc)
+    return signals, stats, diagnostics
 
 
 def _trend_is_bullish(daily_row: pd.Series, strict: bool) -> bool:
