@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -12,6 +14,22 @@ log = logging.getLogger(__name__)
 
 NEW_YORK = ZoneInfo("America/New_York")
 SECOND_BAR_START_MINUTE = 13 * 60 + 30
+DAILY_OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
+
+
+@dataclass
+class BatchDailyFetchStats:
+    """Counters and timings for one official-daily batch download pass."""
+
+    universe_count: int = 0
+    batch_size: int = 50
+    batch_count: int = 0
+    batch_success_count: int = 0
+    fallback_retry_count: int = 0
+    fallback_success_count: int = 0
+    final_failed_count: int = 0
+    batch_download_seconds: float = 0.0
+    fallback_retry_seconds: float = 0.0
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
@@ -91,6 +109,108 @@ def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:
     # ``prepost=False`` is the source-level RTH guarantee.  Keep the
     # defensive daily filter as a second line of protection for every caller.
     return _daily_regular_session_only(_normalize(df))
+
+
+def _valid_daily_ohlcv(df: pd.DataFrame) -> bool:
+    """Whether a normalised official-daily frame is safe for indicator input."""
+    return (
+        not df.empty
+        and all(column in df.columns for column in DAILY_OHLCV_COLUMNS)
+        and not df[DAILY_OHLCV_COLUMNS].isna().any().any()
+    )
+
+
+def _extract_batch_symbol(downloaded: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Extract one ticker from either yfinance MultiIndex column orientation."""
+    if downloaded is None or downloaded.empty:
+        return pd.DataFrame()
+    if not isinstance(downloaded.columns, pd.MultiIndex):
+        return _daily_regular_session_only(_normalize(downloaded.copy()))
+
+    wanted = str(symbol).upper()
+    for level in range(downloaded.columns.nlevels):
+        labels = downloaded.columns.get_level_values(level)
+        matches = [label for label in labels.unique() if str(label).upper() == wanted]
+        if not matches:
+            continue
+        frame = downloaded.xs(matches[0], axis=1, level=level, drop_level=True)
+        # A pathological three-level result is still handled defensively by
+        # selecting the price-field level before the usual normalisation.
+        if isinstance(frame.columns, pd.MultiIndex):
+            for nested_level in range(frame.columns.nlevels):
+                fields = {str(value).lower() for value in frame.columns.get_level_values(nested_level)}
+                if {"open", "high", "low", "close"}.issubset(fields):
+                    frame.columns = frame.columns.get_level_values(nested_level)
+                    break
+        return _daily_regular_session_only(_normalize(frame))
+    return pd.DataFrame()
+
+
+def fetch_daily_batch(
+    symbols: list[str],
+    period: str = "max",
+    batch_size: int = 50,
+    *,
+    stats: BatchDailyFetchStats | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Fetch confirmed Yahoo 1D history in sequential, rate-limit-safe batches.
+
+    Each batch uses yfinance's internal threads.  A malformed or missing ticker
+    is retried only once through the established single-symbol API so callers
+    retain its existing RTH filtering and error behaviour.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols if symbol))
+    metrics = stats if stats is not None else BatchDailyFetchStats()
+    metrics.universe_count = len(ordered)
+    metrics.batch_size = batch_size
+    metrics.batch_count = (len(ordered) + batch_size - 1) // batch_size
+    result: dict[str, pd.DataFrame] = {}
+
+    import yfinance as yf
+
+    for start in range(0, len(ordered), batch_size):
+        batch = ordered[start : start + batch_size]
+        started = time.perf_counter()
+        try:
+            downloaded = yf.download(
+                tickers=batch,
+                period=period,
+                interval="1d",
+                auto_adjust=True,
+                prepost=False,
+                progress=False,
+                threads=True,
+            )
+        except Exception as exc:  # Retry only individual tickers below.
+            log.warning("official daily batch %s-%s failed: %s", start + 1, start + len(batch), exc)
+            downloaded = pd.DataFrame()
+        metrics.batch_download_seconds += time.perf_counter() - started
+
+        for symbol in batch:
+            frame = _extract_batch_symbol(downloaded, symbol)
+            if _valid_daily_ohlcv(frame):
+                result[symbol] = frame
+                metrics.batch_success_count += 1
+                continue
+
+            metrics.fallback_retry_count += 1
+            retry_started = time.perf_counter()
+            try:
+                frame = fetch_daily(symbol, period=period)
+            except Exception as exc:
+                log.warning("%s official daily fallback failed: %s", symbol, exc)
+                frame = pd.DataFrame()
+            metrics.fallback_retry_seconds += time.perf_counter() - retry_started
+            if _valid_daily_ohlcv(frame):
+                result[symbol] = frame
+                metrics.fallback_success_count += 1
+            else:
+                metrics.final_failed_count += 1
+
+    return result
 
 
 def fetch_hourly(symbol: str, period: str = "730d") -> pd.DataFrame:

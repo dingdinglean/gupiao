@@ -5,6 +5,7 @@ import argparse
 import csv
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -48,6 +49,7 @@ def load_config(*, require_smtp: bool = False) -> dict:
         "to_addrs": [value.strip() for value in os.getenv("EMAIL_TO", "").replace(";", ",").split(",") if value.strip()],
         "strict_separation": os.getenv("STRICT_BLUE_ABOVE", "false").lower() == "true",
         "max_workers": int(os.getenv("MAX_WORKERS", "6")),
+        "daily_batch_size": int(os.getenv("DAILY_BATCH_SIZE", "50")),
     }
 
 
@@ -72,9 +74,11 @@ def write_reports(
         writer.writeheader()
         writer.writerows(signal.to_dict() for signal in signals)
     daily_fields = ["symbol", "session", "scan_mode", "official_daily_fresh", "official_daily_source", "official_history_bars", "open", "high", "low", "close", "DIFF", "DEA", "MACD", "N1", "MM1", "CC1", "CC2", "CC3", "DIFL1", "DIFL2", "DIFL3", "AAA", "BBB", "CCC", "JJJ_prev", "JJJ", "DXDX", "BLUE_UP", "BLUE_DW", "YELLOW_UP", "YELLOW_DW", "BLUE_ABOVE_YELLOW", "final_signal", "matched_h4_same_session", "final_level"]
+    diagnostics_started = time.perf_counter()
     with (OUTPUT_DIR / "daily_dxdx_diagnostics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=daily_fields); writer.writeheader()
         writer.writerows(item.to_dict() for item in daily_diagnostics or [])
+    stats.diagnostics_write_seconds = time.perf_counter() - diagnostics_started
     daily_count = sum(signal.signal_level == "DAILY" for signal in signals)
     lines = [
         "【美股日线抄底雷达】",
@@ -82,6 +86,12 @@ def write_reports(
         f"成功取数数量：{stats.fetched_count}",
         f"数据失败数量：{stats.failed_count}",
         f"日线DXDX信号数量：{daily_count}",
+        f"批量数量：{stats.batch_count}",
+        f"批量取数秒数：{stats.batch_download_seconds:.3f}",
+        f"单股重试数量：{stats.fallback_retry_count}",
+        f"最终失败数量：{stats.final_failed_count}",
+        f"指标计算秒数：{stats.indicator_compute_seconds:.3f}",
+        f"诊断写入秒数：{stats.diagnostics_write_seconds:.3f}",
         f"邮件是否发送：{'是' if email_sent else '否'}",
         f"检测时间：{detected_at.isoformat()}",
     ]
@@ -118,16 +128,26 @@ def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_ru
 
     Only Yahoo's official 1D bars participate in signal production.
     """
+    runtime_started = time.perf_counter()
     sessions = [pd.Timestamp(item) for item in confirmation_session_times(now or datetime.now().astimezone())]
-    all_signals, total, daily_rows = run_confirmation_screener(symbols, sessions, require_strict_separation=cfg["strict_separation"], max_workers=cfg["max_workers"])
+    all_signals, total, daily_rows = run_confirmation_screener(
+        symbols, sessions,
+        require_strict_separation=cfg["strict_separation"],
+        max_workers=cfg["max_workers"],
+        batch_size=cfg.get("daily_batch_size", 50),
+    )
     new_signals = state.filter_new(all_signals)
     started = now or datetime.now()
     if dry_run:
         write_reports(new_signals, total, email_sent=False, detected_at=started, daily_diagnostics=daily_rows)
+        total.total_runtime_seconds = time.perf_counter() - runtime_started
+        _log_confirmation_timing(total)
         return new_signals, total, False
     if not new_signals:
         write_reports([], total, email_sent=False, detected_at=started, daily_diagnostics=daily_rows)
         state.save()
+        total.total_runtime_seconds = time.perf_counter() - runtime_started
+        _log_confirmation_timing(total)
         return [], total, False
     require_smtp_config(cfg)
     subject, body = format_signals_email(new_signals, pool_count=total.pool_count, scan_time=started)
@@ -136,7 +156,24 @@ def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_ru
         state.mark_sent(signal)
     state.save()
     write_reports(new_signals, total, email_sent=True, detected_at=started, daily_diagnostics=daily_rows)
+    total.total_runtime_seconds = time.perf_counter() - runtime_started
+    _log_confirmation_timing(total)
     return new_signals, total, True
+
+
+def _log_confirmation_timing(stats: ScanStats) -> None:
+    log.info(
+        "daily confirmation timing universe_count=%s batch_size=%s batch_count=%s "
+        "batch_download_seconds=%.3f fallback_retry_seconds=%.3f "
+        "indicator_compute_seconds=%.3f diagnostics_write_seconds=%.3f "
+        "total_runtime_seconds=%.3f batch_success_count=%s fallback_retry_count=%s "
+        "fallback_success_count=%s final_failed_count=%s",
+        stats.universe_count, stats.batch_size, stats.batch_count,
+        stats.batch_download_seconds, stats.fallback_retry_seconds,
+        stats.indicator_compute_seconds, stats.diagnostics_write_seconds,
+        stats.total_runtime_seconds, stats.batch_success_count,
+        stats.fallback_retry_count, stats.fallback_success_count, stats.final_failed_count,
+    )
 
 
 def replay_daily(symbol: str, date: str) -> int:

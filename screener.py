@@ -6,6 +6,7 @@ It keeps the original DXDX formula and EMA23/EMA89 trend filter.
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from data_fetcher import fetch_daily, fetch_hourly, resample_to_4h, rth_hourly_to_daily
+from data_fetcher import BatchDailyFetchStats, fetch_daily, fetch_daily_batch, fetch_hourly, resample_to_4h, rth_hourly_to_daily
 from indicators import add_all_indicators
 from session_calendar import nyse_session
 from universe import is_us_listed_stock
@@ -124,6 +125,18 @@ class ScanStats:
     fetched_count: int = 0
     failed_count: int = 0
     stale_daily_h4_count: int = 0
+    universe_count: int = 0
+    batch_size: int = 0
+    batch_count: int = 0
+    batch_success_count: int = 0
+    fallback_retry_count: int = 0
+    fallback_success_count: int = 0
+    final_failed_count: int = 0
+    batch_download_seconds: float = 0.0
+    fallback_retry_seconds: float = 0.0
+    indicator_compute_seconds: float = 0.0
+    diagnostics_write_seconds: float = 0.0
+    total_runtime_seconds: float = 0.0
 
 
 def _as_new_york_time(now: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
@@ -206,11 +219,10 @@ def _daily_diagnostic(
     )
 
 
-def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], *, require_strict_separation: bool = False) -> tuple[list[Signal], list[DailyDiagnostic]]:
-    """Official-daily-only confirmation; hourly data is never fetched here."""
+def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], raw_daily: pd.DataFrame, *, require_strict_separation: bool = False) -> tuple[list[Signal], list[DailyDiagnostic]]:
+    """Evaluate already-fetched official 1D bars locally; never fetch Yahoo."""
     if not is_us_listed_stock(symbol): return [], []
-    raw = fetch_daily(symbol, period="max")
-    daily = add_all_indicators(raw)
+    daily = add_all_indicators(raw_daily)
     signals: list[Signal] = []; diagnostics: list[DailyDiagnostic] = []
     index_dates = pd.DatetimeIndex(daily.index).tz_convert(NEW_YORK).normalize()
     for session in session_dates:
@@ -225,15 +237,57 @@ def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], *,
     return signals, diagnostics
 
 
-def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timestamp], *, max_workers: int = 6, require_strict_separation: bool = False) -> tuple[list[Signal], ScanStats, list[DailyDiagnostic]]:
-    allowed = [s for s in symbols if is_us_listed_stock(s)]; stats = ScanStats(pool_count=len(allowed)); signals=[]; diagnostics=[]
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(check_symbol_confirmation, symbol, session_dates, require_strict_separation=require_strict_separation): symbol for symbol in allowed}
-        for future in as_completed(futures):
-            try:
-                found, rows = future.result(); signals.extend(found); diagnostics.extend(rows); stats.fetched_count += 1
-            except Exception as exc:
-                stats.failed_count += 1; log.warning("%s skipped: %s", futures[future], exc)
+def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timestamp], *, max_workers: int = 6, require_strict_separation: bool = False, batch_size: int = 50) -> tuple[list[Signal], ScanStats, list[DailyDiagnostic]]:
+    """Batch-download official daily history, then evaluate five sessions locally.
+
+    ``max_workers`` is intentionally retained for call compatibility.  Network
+    parallelism belongs solely to yfinance's ``download(..., threads=True)``;
+    outer batches run sequentially to avoid rate-limit bursts.
+    """
+    del max_workers
+    started = time.perf_counter()
+    allowed = [s for s in symbols if is_us_listed_stock(s)]
+    stats = ScanStats(pool_count=len(allowed), universe_count=len(allowed), batch_size=batch_size)
+    metrics = BatchDailyFetchStats()
+    daily_map = fetch_daily_batch(allowed, period="max", batch_size=batch_size, stats=metrics)
+    for field in (
+        "batch_size", "batch_count", "batch_success_count", "fallback_retry_count",
+        "fallback_success_count", "final_failed_count", "batch_download_seconds",
+        "fallback_retry_seconds",
+    ):
+        setattr(stats, field, getattr(metrics, field))
+
+    signals: list[Signal] = []
+    diagnostics: list[DailyDiagnostic] = []
+    compute_started = time.perf_counter()
+    for symbol in allowed:
+        raw_daily = daily_map.get(symbol.upper())
+        if raw_daily is None or raw_daily.empty:
+            stats.failed_count += 1
+            continue
+        try:
+            found, rows = check_symbol_confirmation(
+                symbol, session_dates, raw_daily,
+                require_strict_separation=require_strict_separation,
+            )
+            signals.extend(found)
+            diagnostics.extend(rows)
+            stats.fetched_count += 1
+        except Exception as exc:
+            stats.failed_count += 1
+            log.warning("%s skipped: %s", symbol, exc)
+    stats.indicator_compute_seconds = time.perf_counter() - compute_started
+    stats.total_runtime_seconds = time.perf_counter() - started
+    log.info(
+        "daily confirmation fetch universe_count=%s batch_size=%s batch_count=%s "
+        "batch_download_seconds=%.3f fallback_retry_seconds=%.3f "
+        "indicator_compute_seconds=%.3f batch_success_count=%s "
+        "fallback_retry_count=%s fallback_success_count=%s final_failed_count=%s",
+        stats.universe_count, stats.batch_size, stats.batch_count,
+        stats.batch_download_seconds, stats.fallback_retry_seconds,
+        stats.indicator_compute_seconds, stats.batch_success_count,
+        stats.fallback_retry_count, stats.fallback_success_count, stats.final_failed_count,
+    )
     return sorted(signals, key=lambda item: (item.daily_signal_time or datetime.min.replace(tzinfo=NEW_YORK), item.symbol)), stats, diagnostics
 
 

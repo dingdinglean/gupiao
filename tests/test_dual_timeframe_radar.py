@@ -349,9 +349,9 @@ class DualTimeframeRadarTests(unittest.TestCase):
         daily = daily_frame(dxdx=True)
         daily[["DIF", "DEA", "MACD_bar", "N1", "MM1"]] = [1.1, 0.9, 0.4, 3, 7]
         sessions = [pd.Timestamp(NOW - pd.Timedelta(days=offset)) for offset in range(5)]
-        with patch("screener.fetch_daily", return_value=daily) as daily_fetch, patch("screener.fetch_hourly") as hourly_fetch, patch("screener.resample_to_4h") as resample, patch("screener.add_all_indicators", side_effect=lambda frame: frame):
-            signals, diagnostics = screener.check_symbol_confirmation("AMD", sessions)
-        self.assertEqual(daily_fetch.call_count, 1)
+        with patch("screener.fetch_daily") as daily_fetch, patch("screener.fetch_hourly") as hourly_fetch, patch("screener.resample_to_4h") as resample, patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+            signals, diagnostics = screener.check_symbol_confirmation("AMD", sessions, daily)
+        daily_fetch.assert_not_called()
         hourly_fetch.assert_not_called()
         resample.assert_not_called()
         self.assertEqual(len(diagnostics), 5)
@@ -362,8 +362,8 @@ class DualTimeframeRadarTests(unittest.TestCase):
 
     def test_confirmation_daily_diagnostic_never_uses_h4_fallback(self):
         daily = daily_frame(dxdx=False)
-        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_hourly") as hourly_fetch, patch("screener.add_all_indicators", side_effect=lambda frame: frame):
-            signals, diagnostics = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)])
+        with patch("screener.fetch_hourly") as hourly_fetch, patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+            signals, diagnostics = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)], daily)
         self.assertEqual(signals, [])
         self.assertFalse(diagnostics[0].DXDX)
         self.assertFalse(diagnostics[0].matched_h4_same_session)
@@ -372,13 +372,13 @@ class DualTimeframeRadarTests(unittest.TestCase):
 
     def test_confirmation_requires_daily_dxdx_and_blue_above_yellow(self):
         for dxdx, bullish in ((False, True), (True, False)):
-            with self.subTest(dxdx=dxdx, bullish=bullish), patch("screener.fetch_daily", return_value=daily_frame(dxdx=dxdx, bullish=bullish)), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
-                signals, _ = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)])
+            with self.subTest(dxdx=dxdx, bullish=bullish), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+                signals, _ = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)], daily_frame(dxdx=dxdx, bullish=bullish))
             self.assertEqual(signals, [])
 
     def test_confirmation_signal_is_daily_and_old_h4_state_does_not_block_it(self):
-        with patch("screener.fetch_daily", return_value=daily_frame(dxdx=True)), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
-            signals, _ = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)])
+        with patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+            signals, _ = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)], daily_frame(dxdx=True))
         item = signals[0]
         self.assertEqual(item.signal_level, "DAILY")
         self.assertEqual(item.source_timeframe, "daily")
