@@ -44,15 +44,12 @@ def count(condition: pd.Series, n: int) -> pd.Series:
 
 def barslast(condition: pd.Series) -> pd.Series:
     """BARSLAST(cond) - bars since condition was last True."""
-    cond_arr = condition.fillna(False).astype(bool).values
-    result = np.full(len(cond_arr), np.nan)
-    last_idx = -1
-    for i in range(len(cond_arr)):
-        if cond_arr[i]:
-            last_idx = i
-            result[i] = 0
-        elif last_idx >= 0:
-            result[i] = i - last_idx
+    cond_arr = condition.fillna(False).astype(bool).to_numpy()
+    positions = np.arange(len(cond_arr))
+    # At every position retain the latest True position.  -1 denotes that
+    # there has not yet been one, which is BARSLAST's NaN case.
+    last_true = np.maximum.accumulate(np.where(cond_arr, positions, -1))
+    result = np.where(last_true >= 0, positions - last_true, np.nan).astype(float)
     return pd.Series(result, index=condition.index)
 
 
@@ -65,50 +62,84 @@ def _to_int_lookback(value, fallback: int = 1) -> int:
     return v if v >= 1 else fallback
 
 
+def _dynamic_window_lengths(lookback: pd.Series) -> np.ndarray:
+    """Translate LLV/HHV dynamic lookback values without changing TDX rules.
+
+    ``_to_int_lookback`` maps a non-positive value to the one-bar fallback
+    and leaves NaN invalid.  The production DXDX formula constrains its
+    lookbacks to 1..100, but this helper deliberately keeps the primitive's
+    generic public behaviour for all ordinary finite numeric inputs.
+    """
+    values = pd.to_numeric(lookback, errors="coerce").to_numpy(dtype=float)
+    lengths = np.full(len(values), -1, dtype=np.int64)
+    valid = ~np.isnan(values)
+    if valid.any():
+        # Python int() truncates toward zero, as does np.trunc.
+        lengths[valid] = np.maximum(np.trunc(values[valid]).astype(np.int64), 1)
+    return lengths
+
+
+def _dynamic_extrema(series: pd.Series, lookback: pd.Series, *, maximum: bool) -> pd.Series:
+    """Vectorised LLV/HHV with a per-row inclusive trailing window.
+
+    The formula's N1/MM1 reset bounds normal production windows to 100 bars.
+    A strided current-to-past matrix therefore replaces thousands of Python
+    slices while keeping the early-history and NaN behaviour of the literal
+    implementation.  A defensive loop remains only for extraordinary caller
+    supplied windows above 512 bars, avoiding an unbounded allocation in this
+    general-purpose primitive; DXDX never takes that fallback.
+    """
+    values = series.to_numpy(dtype=float, copy=False)
+    lengths = _dynamic_window_lengths(lookback)
+    out = np.full(len(values), np.nan)
+    valid = lengths >= 1
+    if not len(values) or not valid.any():
+        return pd.Series(out, index=series.index)
+
+    max_window = int(lengths[valid].max())
+    if max_window > 512:
+        # Preserve public generic semantics without allocating O(n * n) for
+        # pathological external inputs.  The cd.docx paths are capped at 100.
+        for i in np.flatnonzero(valid):
+            window = values[max(0, i - lengths[i] + 1): i + 1]
+            finite = window[~np.isnan(window)]
+            if finite.size:
+                out[i] = finite.max() if maximum else finite.min()
+        return pd.Series(out, index=series.index)
+
+    # Pad the unavailable pre-history with NaN.  np.fmin/fmax intentionally
+    # ignore isolated NaNs, exactly like the prior explicit finite filtering.
+    padded = np.pad(values, (max_window - 1, 0), constant_values=np.nan)
+    trailing = np.lib.stride_tricks.sliding_window_view(padded, max_window)[:, ::-1]
+    accumulated = (np.fmax if maximum else np.fmin).accumulate(trailing, axis=1)
+    selected = lengths[valid] - 1
+    out[valid] = accumulated[np.flatnonzero(valid), selected]
+    return pd.Series(out, index=series.index)
+
+
 def llv_dyn(series: pd.Series, lookback: pd.Series) -> pd.Series:
     """LLV with per-bar variable lookback. lookback can contain NaN."""
-    values = series.values.astype(float)
-    lb = lookback.values
-    out = np.full(len(series), np.nan)
-    for i in range(len(series)):
-        n = _to_int_lookback(lb[i])
-        if n < 1:
-            continue
-        start = max(0, i - n + 1)
-        window = values[start:i + 1]
-        window = window[~np.isnan(window)]
-        if window.size:
-            out[i] = window.min()
-    return pd.Series(out, index=series.index)
+    return _dynamic_extrema(series, lookback, maximum=False)
 
 
 def hhv_dyn(series: pd.Series, lookback: pd.Series) -> pd.Series:
-    values = series.values.astype(float)
-    lb = lookback.values
-    out = np.full(len(series), np.nan)
-    for i in range(len(series)):
-        n = _to_int_lookback(lb[i])
-        if n < 1:
-            continue
-        start = max(0, i - n + 1)
-        window = values[start:i + 1]
-        window = window[~np.isnan(window)]
-        if window.size:
-            out[i] = window.max()
-    return pd.Series(out, index=series.index)
+    return _dynamic_extrema(series, lookback, maximum=True)
 
 
 def ref_dyn(series: pd.Series, lookback: pd.Series) -> pd.Series:
     """REF with per-bar variable lookback."""
-    values = series.values.astype(float)
-    lb = lookback.values
+    values = series.to_numpy(dtype=float, copy=False)
+    lb = pd.to_numeric(lookback, errors="coerce").to_numpy(dtype=float)
     out = np.full(len(series), np.nan)
-    for i in range(len(series)):
-        if np.isnan(lb[i]):
-            continue
-        idx = i - int(lb[i])
-        if 0 <= idx < len(values):
-            out[i] = values[idx]
+    positions = np.arange(len(values))
+    valid_lookback = ~np.isnan(lb)
+    offsets = np.zeros(len(values), dtype=np.int64)
+    # np.trunc reproduces Python int(float) for the finite numeric lookbacks
+    # used by the formula (including truncation toward zero).
+    offsets[valid_lookback] = np.trunc(lb[valid_lookback]).astype(np.int64)
+    source_positions = positions - offsets
+    valid = valid_lookback & (source_positions >= 0) & (source_positions < len(values))
+    out[valid] = values[source_positions[valid]]
     return pd.Series(out, index=series.index)
 
 
