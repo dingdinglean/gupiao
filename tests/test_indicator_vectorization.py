@@ -6,6 +6,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from screener import check_symbol_confirmation
 from indicators import (
     add_all_indicators,
     barslast,
@@ -171,6 +172,37 @@ class DynamicPrimitiveParityTests(unittest.TestCase):
         self.assertListEqual(
             result["BLUE_ABOVE_YELLOW"].tolist(),
             ((result["BLUE_UP"] > result["YELLOW_UP"]) & (result["BLUE_DW"] > result["YELLOW_DW"])).tolist(),
+        )
+
+    def test_five_session_lookup_matches_literal_per_session_search(self):
+        frame = fixture_frame(5000)
+        frame.index = frame.index.tz_localize("America/New_York")
+        sessions = [pd.Timestamp(frame.index[-offset]) for offset in range(1, 6)]
+        signals, diagnostics = check_symbol_confirmation("AMD", sessions, frame)
+        indicator_frame = add_all_indicators(frame)
+        normalized = pd.DatetimeIndex(indicator_frame.index).tz_convert("America/New_York").normalize()
+        expected = []
+        for session in sessions:
+            positions = [i for i, day in enumerate(normalized) if day == session.normalize()]
+            position = positions[-1] if positions else None
+            row = indicator_frame.iloc[position] if position is not None else None
+            expected.append((
+                session.normalize(),
+                bool(row is not None and row["DXDX"] and row["BLUE_ABOVE_YELLOW"]),
+                bool(row["DXDX"]) if row is not None else False,
+                float(row["DIF"]) if row is not None else None,
+            ))
+        self.assertEqual(len(diagnostics), 5)
+        self.assertEqual([(pd.Timestamp(item.session), item.final_signal, item.DXDX, item.DIFF) for item in diagnostics], expected)
+        expected_signals = []
+        for session, final, _, _ in expected:
+            if final:
+                position = [i for i, day in enumerate(normalized) if day == session][-1]
+                expected_signals.append(("AMD", session.to_pydatetime(), float(indicator_frame.iloc[position]["close"])))
+        expected_signals.sort()
+        self.assertEqual(
+            [(signal.symbol, signal.daily_signal_time, signal.close) for signal in signals],
+            expected_signals,
         )
 
 

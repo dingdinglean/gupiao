@@ -234,9 +234,15 @@ def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], ra
     daily = add_all_indicators(raw_daily)
     signals: list[Signal] = []; diagnostics: list[DailyDiagnostic] = []
     index_dates = pd.DatetimeIndex(daily.index).tz_convert(NEW_YORK).normalize()
+    # The prior five-session loop rescanned every max-history row for every
+    # requested session and repeatedly converted its timestamp through
+    # _session_date.  Keep the exact "last row for a session" semantics with
+    # one index pass, then perform five O(1) lookups.  This only changes local
+    # lookup cost; it does not alter daily bars, indicators, diagnostics, or
+    # signal classification.
+    positions_by_session = {session: position for position, session in enumerate(index_dates)}
     for session in session_dates:
-        positions = [i for i, day in enumerate(index_dates) if day == _session_date(session)]
-        position = positions[-1] if positions else None
+        position = positions_by_session.get(_session_date(session))
         row = daily.iloc[position] if position is not None else None
         previous_row = daily.iloc[position - 1] if position is not None and position > 0 else None
         daily_ok = bool(row is not None and row.get("DXDX", False) and _trend_is_bullish(row, require_strict_separation))
