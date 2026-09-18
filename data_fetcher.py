@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
@@ -15,6 +17,15 @@ log = logging.getLogger(__name__)
 NEW_YORK = ZoneInfo("America/New_York")
 SECOND_BAR_START_MINUTE = 13 * 60 + 30
 DAILY_OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
+YF_BATCH_THREADS = 8
+YF_BATCH_TIMEOUT_SECONDS = 12
+YF_SINGLE_TIMEOUT_SECONDS = 10
+YF_RETRY_BATCH_SIZE = 10
+
+_YF_RUNTIME_LOCK = threading.Lock()
+_YF_RUNTIME_READY = False
+_YF_CACHE_WARMED = False
+_YF_CACHE_DIR: str | None = None
 
 
 @dataclass
@@ -25,11 +36,77 @@ class BatchDailyFetchStats:
     batch_size: int = 50
     batch_count: int = 0
     batch_success_count: int = 0
+    mini_batch_retry_count: int = 0
+    mini_batch_retry_symbols: int = 0
+    mini_batch_success_count: int = 0
+    single_retry_count: int = 0
+    single_retry_success_count: int = 0
     fallback_retry_count: int = 0
     fallback_success_count: int = 0
     final_failed_count: int = 0
+    cache_warmup_seconds: float = 0.0
     batch_download_seconds: float = 0.0
+    mini_batch_retry_seconds: float = 0.0
+    single_retry_seconds: float = 0.0
     fallback_retry_seconds: float = 0.0
+    normalization_seconds: float = 0.0
+
+
+def configure_yfinance_runtime() -> str:
+    """Give this process an isolated yfinance SQLite/timezone cache exactly once."""
+    global _YF_RUNTIME_READY, _YF_CACHE_DIR
+    if _YF_RUNTIME_READY:
+        return _YF_CACHE_DIR or ""
+
+    with _YF_RUNTIME_LOCK:
+        if _YF_RUNTIME_READY:
+            return _YF_CACHE_DIR or ""
+        import yfinance as yf
+
+        _YF_CACHE_DIR = tempfile.mkdtemp(prefix="gupiao-yfinance-")
+        # This must precede every Ticker/history/download request.  In
+        # particular, it prevents first-use SQLite contention in yf.download's
+        # internal worker pool on GitHub runners.
+        set_cache = getattr(yf, "set_tz_cache_location", None)
+        if callable(set_cache):
+            set_cache(_YF_CACHE_DIR)
+        else:  # Lightweight unit-test doubles may expose only Ticker/history.
+            log.warning("yfinance runtime has no set_tz_cache_location capability")
+        try:
+            yf.config.network.retries = 2
+        except Exception:
+            pass
+        _YF_RUNTIME_READY = True
+        log.info("yfinance runtime cache_dir=%s", _YF_CACHE_DIR)
+        return _YF_CACHE_DIR
+
+
+def warm_yfinance_cache() -> tuple[bool, float]:
+    """Initialise yfinance cache/cookie state before threaded production batches."""
+    global _YF_CACHE_WARMED
+    configure_yfinance_runtime()
+    with _YF_RUNTIME_LOCK:
+        if _YF_CACHE_WARMED:
+            return True, 0.0
+        import yfinance as yf
+
+        started = time.perf_counter()
+        success = True
+        try:
+            # Warm-up data is intentionally not returned to callers or used by
+            # indicators, diagnostics, state, or production signals.
+            yf.download(
+                tickers=["SPY"], period="5d", interval="1d",
+                auto_adjust=True, prepost=False, progress=False,
+                threads=False, timeout=YF_SINGLE_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            success = False
+            log.warning("yfinance cache warmup failed: %s", exc)
+        elapsed = time.perf_counter() - started
+        _YF_CACHE_WARMED = True
+        log.info("yfinance cache warmup_seconds=%.3f warmup_success=%s", elapsed, str(success).lower())
+        return success, elapsed
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
@@ -97,18 +174,36 @@ def _daily_regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
     return out.loc[keep.to_numpy()]
 
 
+def _normalize_official_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalise Yahoo's official 1D response without needless calendar scans.
+
+    A standard ``interval=1d, prepost=False`` response is midnight-labelled in
+    New York time.  It is already one official RTH OHLCV bar per date, so it
+    does not need a per-row XNYS lookup.  Any unexpected intraday/mixed input
+    deliberately falls back to the existing strict defensive filter.
+    """
+    out = _as_new_york_index(_normalize(df))
+    if out.empty:
+        return out
+    if bool((out.index == out.index.normalize()).all()):
+        return out.sort_index()
+    return _daily_regular_session_only(out)
+
+
 def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:
     """Confirmed US regular-session daily bars; no extended-hours data."""
+    configure_yfinance_runtime()
     import yfinance as yf
     df = yf.Ticker(symbol).history(
         period=period,
         interval="1d",
         auto_adjust=True,
         prepost=False,
+        timeout=YF_SINGLE_TIMEOUT_SECONDS,
     )
     # ``prepost=False`` is the source-level RTH guarantee.  Keep the
     # defensive daily filter as a second line of protection for every caller.
-    return _daily_regular_session_only(_normalize(df))
+    return _normalize_official_daily(df)
 
 
 def _valid_daily_ohlcv(df: pd.DataFrame) -> bool:
@@ -125,7 +220,7 @@ def _extract_batch_symbol(downloaded: pd.DataFrame, symbol: str) -> pd.DataFrame
     if downloaded is None or downloaded.empty:
         return pd.DataFrame()
     if not isinstance(downloaded.columns, pd.MultiIndex):
-        return _daily_regular_session_only(_normalize(downloaded.copy()))
+        return _normalize_official_daily(downloaded.copy())
 
     wanted = str(symbol).upper()
     for level in range(downloaded.columns.nlevels):
@@ -142,8 +237,36 @@ def _extract_batch_symbol(downloaded: pd.DataFrame, symbol: str) -> pd.DataFrame
                 if {"open", "high", "low", "close"}.issubset(fields):
                     frame.columns = frame.columns.get_level_values(nested_level)
                     break
-        return _daily_regular_session_only(_normalize(frame))
+        return _normalize_official_daily(frame)
     return pd.DataFrame()
+
+
+def _download_daily_batch(yf, symbols: list[str], *, period: str, threads: int) -> pd.DataFrame:
+    """One bounded Yahoo batch request; callers own retry policy."""
+    return yf.download(
+        tickers=symbols,
+        period=period,
+        interval="1d",
+        auto_adjust=True,
+        prepost=False,
+        progress=False,
+        threads=threads,
+        timeout=YF_BATCH_TIMEOUT_SECONDS,
+    )
+
+
+def _extract_valid_batch(downloaded: pd.DataFrame, symbols: list[str], metrics: BatchDailyFetchStats) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    accepted: dict[str, pd.DataFrame] = {}
+    missing: list[str] = []
+    for symbol in symbols:
+        started = time.perf_counter()
+        frame = _extract_batch_symbol(downloaded, symbol)
+        metrics.normalization_seconds += time.perf_counter() - started
+        if _valid_daily_ohlcv(frame):
+            accepted[symbol] = frame
+        else:
+            missing.append(symbol)
+    return accepted, missing
 
 
 def fetch_daily_batch(
@@ -153,12 +276,7 @@ def fetch_daily_batch(
     *,
     stats: BatchDailyFetchStats | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Fetch confirmed Yahoo 1D history in sequential, rate-limit-safe batches.
-
-    Each batch uses yfinance's internal threads.  A malformed or missing ticker
-    is retried only once through the established single-symbol API so callers
-    retain its existing RTH filtering and error behaviour.
-    """
+    """Fetch official 1D history via bounded batches and layered retries."""
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
 
@@ -169,52 +287,79 @@ def fetch_daily_batch(
     metrics.batch_count = (len(ordered) + batch_size - 1) // batch_size
     result: dict[str, pd.DataFrame] = {}
 
+    configure_yfinance_runtime()
+    warmup_success, metrics.cache_warmup_seconds = warm_yfinance_cache()
+    if not warmup_success:
+        log.warning("continuing daily batches despite unsuccessful yfinance warmup")
     import yfinance as yf
 
-    for start in range(0, len(ordered), batch_size):
+    unresolved: list[str] = []
+    for batch_number, start in enumerate(range(0, len(ordered), batch_size), start=1):
         batch = ordered[start : start + batch_size]
+        log.info("daily batch %s/%s start symbols=%s", batch_number, metrics.batch_count, len(batch))
         started = time.perf_counter()
         try:
-            downloaded = yf.download(
-                tickers=batch,
-                period=period,
-                interval="1d",
-                auto_adjust=True,
-                prepost=False,
-                progress=False,
-                threads=True,
-            )
-        except Exception as exc:  # Retry only individual tickers below.
-            log.warning("official daily batch %s-%s failed: %s", start + 1, start + len(batch), exc)
+            downloaded = _download_daily_batch(yf, batch, period=period, threads=YF_BATCH_THREADS)
+        except Exception as exc:
+            log.warning("daily batch %s/%s failed: %s", batch_number, metrics.batch_count, exc)
             downloaded = pd.DataFrame()
-        metrics.batch_download_seconds += time.perf_counter() - started
+        elapsed = time.perf_counter() - started
+        metrics.batch_download_seconds += elapsed
+        accepted, missing = _extract_valid_batch(downloaded, batch, metrics)
+        result.update(accepted)
+        metrics.batch_success_count += len(accepted)
+        unresolved.extend(missing)
+        log.info("daily batch %s/%s done elapsed=%.3f success=%s missing=%s", batch_number, metrics.batch_count, elapsed, len(accepted), len(missing))
 
-        for symbol in batch:
-            frame = _extract_batch_symbol(downloaded, symbol)
-            if _valid_daily_ohlcv(frame):
-                result[symbol] = frame
-                metrics.batch_success_count += 1
-                continue
+    still_missing: list[str] = []
+    mini_count = (len(unresolved) + YF_RETRY_BATCH_SIZE - 1) // YF_RETRY_BATCH_SIZE
+    for retry_number, start in enumerate(range(0, len(unresolved), YF_RETRY_BATCH_SIZE), start=1):
+        batch = unresolved[start : start + YF_RETRY_BATCH_SIZE]
+        metrics.mini_batch_retry_count += 1
+        metrics.mini_batch_retry_symbols += len(batch)
+        log.info("daily retry batch %s/%s start symbols=%s", retry_number, mini_count, len(batch))
+        started = time.perf_counter()
+        try:
+            downloaded = _download_daily_batch(yf, batch, period=period, threads=4)
+        except Exception as exc:
+            log.warning("daily retry batch %s/%s failed: %s", retry_number, mini_count, exc)
+            downloaded = pd.DataFrame()
+        elapsed = time.perf_counter() - started
+        metrics.mini_batch_retry_seconds += elapsed
+        accepted, missing = _extract_valid_batch(downloaded, batch, metrics)
+        result.update(accepted)
+        metrics.mini_batch_success_count += len(accepted)
+        still_missing.extend(missing)
+        log.info("daily retry batch %s/%s done elapsed=%.3f success=%s missing=%s", retry_number, mini_count, elapsed, len(accepted), len(missing))
 
-            metrics.fallback_retry_count += 1
-            retry_started = time.perf_counter()
-            try:
-                frame = fetch_daily(symbol, period=period)
-            except Exception as exc:
-                log.warning("%s official daily fallback failed: %s", symbol, exc)
-                frame = pd.DataFrame()
-            metrics.fallback_retry_seconds += time.perf_counter() - retry_started
-            if _valid_daily_ohlcv(frame):
-                result[symbol] = frame
-                metrics.fallback_success_count += 1
-            else:
-                metrics.final_failed_count += 1
+    for symbol in still_missing:
+        metrics.single_retry_count += 1
+        metrics.fallback_retry_count += 1  # Backward-compatible report field.
+        log.info("daily single retry %s start", symbol)
+        retry_started = time.perf_counter()
+        try:
+            frame = fetch_daily(symbol, period=period)
+        except Exception as exc:
+            log.warning("daily single retry %s failed: %s", symbol, exc)
+            frame = pd.DataFrame()
+        elapsed = time.perf_counter() - retry_started
+        metrics.single_retry_seconds += elapsed
+        metrics.fallback_retry_seconds += elapsed
+        if _valid_daily_ohlcv(frame):
+            result[symbol] = frame
+            metrics.single_retry_success_count += 1
+            metrics.fallback_success_count += 1
+            log.info("daily single retry %s done elapsed=%.3f success=true", symbol, elapsed)
+        else:
+            metrics.final_failed_count += 1
+            log.warning("daily single retry %s done elapsed=%.3f success=false", symbol, elapsed)
 
     return result
 
 
 def fetch_hourly(symbol: str, period: str = "730d") -> pd.DataFrame:
     """Regular-session hourly bars. Yahoo caps 1H history at about 730 days."""
+    configure_yfinance_runtime()
     import yfinance as yf
     df = yf.Ticker(symbol).history(
         period=period,

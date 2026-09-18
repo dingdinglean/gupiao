@@ -47,12 +47,25 @@ def multiindex_download(symbols: list[str], *, ticker_first: bool = False) -> pd
 
 
 class DailyBatchFetchTests(unittest.TestCase):
+    def setUp(self):
+        self.runtime = patch("data_fetcher.configure_yfinance_runtime", return_value="/tmp/gupiao-yf-test")
+        self.warmup = patch("data_fetcher.warm_yfinance_cache", return_value=(True, 0.01))
+        self.runtime.start()
+        self.warmup.start()
+
+    def tearDown(self):
+        self.runtime.stop()
+        self.warmup.stop()
+        data_fetcher._YF_RUNTIME_READY = False
+        data_fetcher._YF_CACHE_WARMED = False
+        data_fetcher._YF_CACHE_DIR = None
+
     def test_503_symbols_make_eleven_sequential_batches(self):
         symbols = [f"X{number}" for number in range(503)]
-        calls: list[list[str]] = []
+        calls: list[dict] = []
 
         def fake_download(**kwargs):
-            calls.append(kwargs["tickers"])
+            calls.append(kwargs)
             return multiindex_download(kwargs["tickers"])
 
         metrics = BatchDailyFetchStats()
@@ -63,6 +76,7 @@ class DailyBatchFetchTests(unittest.TestCase):
         self.assertEqual(metrics.batch_success_count, 503)
         self.assertEqual(metrics.fallback_retry_count, 0)
         self.assertEqual(len(result), 503)
+        self.assertTrue(all(call["threads"] == 8 and call["timeout"] == 12 for call in calls))
 
     def test_extracts_field_then_ticker_multiindex(self):
         with patch("yfinance.download", return_value=multiindex_download(["AMD", "MSFT"])):
@@ -144,6 +158,93 @@ class DailyBatchFetchTests(unittest.TestCase):
         self.assertAlmostEqual(item.DIFF, float(row["DIF"]))
         self.assertAlmostEqual(item.DEA, float(row["DEA"]))
         self.assertEqual(item.DXDX, bool(row["DXDX"]))
+
+    def test_runtime_configures_isolated_cache_once_before_requests(self):
+        self.runtime.stop(); self.warmup.stop()
+        data_fetcher._YF_RUNTIME_READY = False
+        data_fetcher._YF_CACHE_DIR = None
+        with patch("data_fetcher.tempfile.mkdtemp", return_value="/tmp/gupiao-yf-runtime") as make_dir, patch("yfinance.set_tz_cache_location") as set_cache:
+            first = data_fetcher.configure_yfinance_runtime()
+            second = data_fetcher.configure_yfinance_runtime()
+        self.assertEqual(first, "/tmp/gupiao-yf-runtime")
+        self.assertEqual(second, first)
+        make_dir.assert_called_once_with(prefix="gupiao-yfinance-")
+        set_cache.assert_called_once_with("/tmp/gupiao-yf-runtime")
+
+    def test_cache_warmup_is_single_threaded_and_nonfatal(self):
+        self.warmup.stop()
+        data_fetcher._YF_CACHE_WARMED = False
+        with patch("data_fetcher.configure_yfinance_runtime", return_value="/tmp/gupiao-yf-runtime"), patch("yfinance.download", return_value=pd.DataFrame()) as download:
+            success, _ = data_fetcher.warm_yfinance_cache()
+        self.assertTrue(success)
+        self.assertFalse(download.call_args.kwargs["threads"])
+        self.assertEqual(download.call_args.kwargs["timeout"], 10)
+
+    def test_standard_midnight_daily_fast_path_skips_xnys_lookup(self):
+        index = pd.date_range("2000-01-03", periods=5000, freq="B", tz=ET)
+        source = pd.DataFrame({"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 100.0}, index=index)
+        with patch("data_fetcher.nyse_session") as lookup:
+            result = data_fetcher._normalize_official_daily(source)
+        self.assertEqual(len(result), 5000)
+        lookup.assert_not_called()
+
+    def test_mixed_intraday_daily_still_drops_extended_row(self):
+        index = pd.DatetimeIndex([
+            pd.Timestamp("2026-09-08 00:00", tz=ET),
+            pd.Timestamp("2026-09-08 20:00", tz=ET),
+        ])
+        source = pd.DataFrame({"open": [10.0, 1.0], "high": [11.0, 999.0], "low": [9.0, 0.01], "close": [10.5, 1.0], "volume": [100.0, 999.0]}, index=index)
+        result = data_fetcher._normalize_official_daily(source)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(float(result.iloc[0]["close"]), 10.5)
+
+    def test_mini_batch_retry_recovers_missing_symbol_without_single_fallback(self):
+        metrics = BatchDailyFetchStats()
+        with patch("yfinance.download", side_effect=[multiindex_download(["AMD"]), multiindex_download(["MSFT"])]) as download, patch("data_fetcher.fetch_daily") as single:
+            result = fetch_daily_batch(["AMD", "MSFT"], stats=metrics)
+        self.assertEqual(len(download.call_args_list), 2)
+        self.assertEqual(metrics.mini_batch_retry_count, 1)
+        self.assertEqual(metrics.mini_batch_retry_symbols, 1)
+        self.assertEqual(metrics.mini_batch_success_count, 1)
+        single.assert_not_called()
+        self.assertEqual(set(result), {"AMD", "MSFT"})
+
+    def test_only_mini_batch_residue_uses_single_fallback(self):
+        metrics = BatchDailyFetchStats()
+        retry = daily_frame(20)
+        with patch("yfinance.download", side_effect=[multiindex_download(["AMD"]), multiindex_download(["AMD"])]), patch("data_fetcher.fetch_daily", return_value=retry) as single:
+            result = fetch_daily_batch(["AMD", "MSFT"], stats=metrics)
+        single.assert_called_once_with("MSFT", period="max")
+        self.assertEqual(metrics.single_retry_count, 1)
+        self.assertEqual(metrics.single_retry_success_count, 1)
+        self.assertEqual(set(result), {"AMD", "MSFT"})
+
+    def test_many_main_batch_misses_use_mini_batches_not_many_single_fetches(self):
+        symbols = [f"X{number}" for number in range(20)]
+        metrics = BatchDailyFetchStats()
+        call_number = 0
+        def retry_download(**kwargs):
+            nonlocal call_number
+            call_number += 1
+            return pd.DataFrame() if call_number == 1 else multiindex_download(kwargs["tickers"])
+        with patch("yfinance.download", side_effect=retry_download) as download, patch("data_fetcher.fetch_daily") as single:
+            result = fetch_daily_batch(symbols, stats=metrics)
+        self.assertEqual(len(download.call_args_list), 3)
+        self.assertEqual(metrics.mini_batch_retry_count, 2)
+        self.assertEqual(metrics.mini_batch_retry_symbols, 20)
+        single.assert_not_called()
+        self.assertEqual(len(result), 20)
+
+    def test_operational_error_enters_retry_layers_without_crashing(self):
+        metrics = BatchDailyFetchStats()
+        error = Exception("OperationalError('database is locked')")
+        with patch("yfinance.download", side_effect=[error, multiindex_download(["AMD"])]) as download:
+            result = fetch_daily_batch(["AMD"], stats=metrics)
+        self.assertEqual(len(download.call_args_list), 2)
+        self.assertEqual(metrics.batch_success_count, 0)
+        self.assertEqual(metrics.mini_batch_success_count, 1)
+        self.assertEqual(metrics.final_failed_count, 0)
+        self.assertIn("AMD", result)
 
 
 if __name__ == "__main__":

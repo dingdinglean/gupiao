@@ -129,11 +129,20 @@ class ScanStats:
     batch_size: int = 0
     batch_count: int = 0
     batch_success_count: int = 0
+    mini_batch_retry_count: int = 0
+    mini_batch_retry_symbols: int = 0
+    mini_batch_success_count: int = 0
+    single_retry_count: int = 0
+    single_retry_success_count: int = 0
     fallback_retry_count: int = 0
     fallback_success_count: int = 0
     final_failed_count: int = 0
     batch_download_seconds: float = 0.0
+    cache_warmup_seconds: float = 0.0
+    mini_batch_retry_seconds: float = 0.0
+    single_retry_seconds: float = 0.0
     fallback_retry_seconds: float = 0.0
+    normalization_seconds: float = 0.0
     indicator_compute_seconds: float = 0.0
     diagnostics_write_seconds: float = 0.0
     total_runtime_seconds: float = 0.0
@@ -241,7 +250,7 @@ def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timesta
     """Batch-download official daily history, then evaluate five sessions locally.
 
     ``max_workers`` is intentionally retained for call compatibility.  Network
-    parallelism belongs solely to yfinance's ``download(..., threads=True)``;
+    parallelism belongs solely to yfinance's bounded batch downloader;
     outer batches run sequentially to avoid rate-limit bursts.
     """
     del max_workers
@@ -251,9 +260,12 @@ def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timesta
     metrics = BatchDailyFetchStats()
     daily_map = fetch_daily_batch(allowed, period="max", batch_size=batch_size, stats=metrics)
     for field in (
-        "batch_size", "batch_count", "batch_success_count", "fallback_retry_count",
-        "fallback_success_count", "final_failed_count", "batch_download_seconds",
-        "fallback_retry_seconds",
+        "batch_size", "batch_count", "batch_success_count", "mini_batch_retry_count",
+        "mini_batch_retry_symbols", "mini_batch_success_count", "single_retry_count",
+        "single_retry_success_count", "fallback_retry_count", "fallback_success_count",
+        "final_failed_count", "cache_warmup_seconds", "batch_download_seconds",
+        "mini_batch_retry_seconds", "single_retry_seconds", "fallback_retry_seconds",
+        "normalization_seconds",
     ):
         setattr(stats, field, getattr(metrics, field))
 
@@ -280,13 +292,20 @@ def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timesta
     stats.total_runtime_seconds = time.perf_counter() - started
     log.info(
         "daily confirmation fetch universe_count=%s batch_size=%s batch_count=%s "
-        "batch_download_seconds=%.3f fallback_retry_seconds=%.3f "
-        "indicator_compute_seconds=%.3f batch_success_count=%s "
-        "fallback_retry_count=%s fallback_success_count=%s final_failed_count=%s",
+        "cache_warmup_seconds=%.3f batch_download_seconds=%.3f "
+        "mini_batch_retry_seconds=%.3f single_retry_seconds=%.3f "
+        "normalization_seconds=%.3f indicator_compute_seconds=%.3f "
+        "batch_success_count=%s mini_batch_retry_count=%s mini_batch_retry_symbols=%s "
+        "mini_batch_success_count=%s single_retry_count=%s single_retry_success_count=%s "
+        "final_failed_count=%s",
         stats.universe_count, stats.batch_size, stats.batch_count,
-        stats.batch_download_seconds, stats.fallback_retry_seconds,
-        stats.indicator_compute_seconds, stats.batch_success_count,
-        stats.fallback_retry_count, stats.fallback_success_count, stats.final_failed_count,
+        stats.cache_warmup_seconds, stats.batch_download_seconds,
+        stats.mini_batch_retry_seconds, stats.single_retry_seconds,
+        stats.normalization_seconds, stats.indicator_compute_seconds,
+        stats.batch_success_count, stats.mini_batch_retry_count,
+        stats.mini_batch_retry_symbols, stats.mini_batch_success_count,
+        stats.single_retry_count, stats.single_retry_success_count,
+        stats.final_failed_count,
     )
     return sorted(signals, key=lambda item: (item.daily_signal_time or datetime.min.replace(tzinfo=NEW_YORK), item.symbol)), stats, diagnostics
 
