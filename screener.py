@@ -37,6 +37,8 @@ class Signal:
     scan_mode: str = "post_close"
     daily_data_source: str = "yahoo_official_daily"
     h4_context_source: str = "yahoo_daily"
+    source_radar: str = "daily"
+    source_timeframe: str = "daily"
 
     def signal_keys(self) -> list[tuple[str, datetime]]:
         keys: list[tuple[str, datetime]] = []
@@ -50,6 +52,9 @@ class Signal:
         result = asdict(self)
         for key in ("daily_signal_time", "h4_signal_time", "detected_at"):
             result[key] = result[key].isoformat() if result[key] else ""
+        signal_time = self.daily_signal_time
+        result["signal_time"] = signal_time.isoformat() if signal_time else ""
+        result["signal_date"] = signal_time.date().isoformat() if signal_time else ""
         return result
 
 
@@ -102,6 +107,12 @@ class DailyDiagnostic:
     AAA: bool; BBB: bool; CCC: bool; JJJ_prev: bool; JJJ: bool; DXDX: bool
     matched_h4_same_session: bool
     final_level: str
+    BLUE_UP: float | None = None
+    BLUE_DW: float | None = None
+    YELLOW_UP: float | None = None
+    YELLOW_DW: float | None = None
+    BLUE_ABOVE_YELLOW: bool = False
+    final_signal: bool = False
 
     def to_dict(self) -> dict:
         value = asdict(self); value["session"] = self.session.isoformat(); return value
@@ -175,20 +186,31 @@ def h4_dxdx_for_session(df: pd.DataFrame, session_date: pd.Timestamp) -> tuple[p
     return matches[-1] if matches else None
 
 
-def _daily_diagnostic(symbol: str, session: pd.Timestamp, row: pd.Series | None, previous_row: pd.Series | None, history_bars: int, h4_match: tuple[pd.Timestamp, pd.Series] | None, level: str, mode: str) -> DailyDiagnostic:
+def _daily_diagnostic(
+    symbol: str,
+    session: pd.Timestamp,
+    row: pd.Series | None,
+    previous_row: pd.Series | None,
+    history_bars: int,
+    final_signal: bool,
+    mode: str,
+) -> DailyDiagnostic:
     number = lambda name: _number(row, name) if row is not None else None
     previous_jjj = bool(previous_row.get("JJJ", False)) if previous_row is not None else False
     return DailyDiagnostic(symbol, _session_date(session).to_pydatetime(), mode, row is not None, "yahoo_official_daily" if row is not None else "missing", history_bars,
         *[number(key) for key in ("open","high","low","close","DIF","DEA","MACD_bar","N1","MM1","CC1","CC2","CC3","DIFL1","DIFL2","DIFL3")],
-        *[bool(row.get(key, False)) if row is not None else False for key in ("AAA","BBB","CCC")], previous_jjj, bool(row.get("JJJ", False)) if row is not None else False, bool(row.get("DXDX", False)) if row is not None else False, h4_match is not None, level)
+        *[bool(row.get(key, False)) if row is not None else False for key in ("AAA","BBB","CCC")], previous_jjj, bool(row.get("JJJ", False)) if row is not None else False, bool(row.get("DXDX", False)) if row is not None else False, False, "DAILY" if final_signal else "",
+        *[number(key) for key in ("BLUE_UP", "BLUE_DW", "YELLOW_UP", "YELLOW_DW")],
+        bool(row.get("BLUE_ABOVE_YELLOW", False)) if row is not None else False,
+        final_signal,
+    )
 
 
 def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], *, require_strict_separation: bool = False) -> tuple[list[Signal], list[DailyDiagnostic]]:
-    """Fetch each source once, then evaluate all confirmation sessions locally."""
+    """Official-daily-only confirmation; hourly data is never fetched here."""
     if not is_us_listed_stock(symbol): return [], []
     raw = fetch_daily(symbol, period="max")
-    hourly = fetch_hourly(symbol, period="730d")
-    daily, h4 = add_all_indicators(raw), add_all_indicators(resample_to_4h(hourly))
+    daily = add_all_indicators(raw)
     signals: list[Signal] = []; diagnostics: list[DailyDiagnostic] = []
     index_dates = pd.DatetimeIndex(daily.index).tz_convert(NEW_YORK).normalize()
     for session in session_dates:
@@ -196,13 +218,10 @@ def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], *,
         position = positions[-1] if positions else None
         row = daily.iloc[position] if position is not None else None
         previous_row = daily.iloc[position - 1] if position is not None and position > 0 else None
-        h4_match = h4_dxdx_for_session(h4, session)
         daily_ok = bool(row is not None and row.get("DXDX", False) and _trend_is_bullish(row, require_strict_separation))
-        h4_ok = bool(h4_match is not None and row is not None and _trend_is_bullish(row, require_strict_separation))
-        level = "S" if daily_ok and h4_ok else ("B" if daily_ok else "")
-        diagnostics.append(_daily_diagnostic(symbol, session, row, previous_row, len(daily), h4_match, level, "official_daily_confirmation"))
-        if level:
-            signals.append(Signal(symbol, level, True, h4_ok, _session_date(session).to_pydatetime(), h4_match[0].to_pydatetime() if h4_ok else None, float(row["close"]), True, datetime.now(tz=NEW_YORK), scan_mode="official_daily_confirmation", daily_data_source="yahoo_official_daily", h4_context_source="yahoo_daily"))
+        diagnostics.append(_daily_diagnostic(symbol, session, row, previous_row, len(daily), daily_ok, "official_daily_confirmation"))
+        if daily_ok:
+            signals.append(Signal(symbol, "DAILY", True, False, _session_date(session).to_pydatetime(), None, float(row["close"]), True, datetime.now(tz=NEW_YORK), scan_mode="official_daily_confirmation", daily_data_source="yahoo_official_daily", h4_context_source=""))
     return signals, diagnostics
 
 
@@ -215,7 +234,7 @@ def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timesta
                 found, rows = future.result(); signals.extend(found); diagnostics.extend(rows); stats.fetched_count += 1
             except Exception as exc:
                 stats.failed_count += 1; log.warning("%s skipped: %s", futures[future], exc)
-    return signals, stats, diagnostics
+    return sorted(signals, key=lambda item: (item.daily_signal_time or datetime.min.replace(tzinfo=NEW_YORK), item.symbol)), stats, diagnostics
 
 
 def _trend_is_bullish(daily_row: pd.Series, strict: bool) -> bool:

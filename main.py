@@ -1,4 +1,4 @@
-"""Daily entry point for the independent US dual-timeframe DXDX pullback radar."""
+"""Official-daily DXDX pullback radar production entry point."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +18,7 @@ except ImportError:  # Test/minimal environments can still use process env.
 
 from notifier import format_signals_email, send_email
 from indicators import compute_macd_divergence
-from screener import DailyDiagnostic, H4Diagnostic, ScanStats, Signal, run_confirmation_screener, run_screener
+from screener import DailyDiagnostic, ScanStats, Signal, run_confirmation_screener
 from session_calendar import nyse_session, previous_nyse_trading_day
 from state import AlertState
 from universe import get_universe
@@ -63,41 +63,25 @@ def write_reports(
     *,
     email_sent: bool,
     detected_at: datetime,
-    diagnostics: list[H4Diagnostic] | None = None,
     daily_diagnostics: list[DailyDiagnostic] | None = None,
 ) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    fields = ["symbol", "signal_level", "daily_dxdx", "h4_dxdx", "daily_signal_time", "h4_signal_time", "close", "blue_above_yellow", "detected_at", "scan_mode", "daily_data_source", "h4_context_source"]
+    fields = ["symbol", "signal_level", "daily_dxdx", "h4_dxdx", "daily_signal_time", "h4_signal_time", "signal_time", "signal_date", "close", "blue_above_yellow", "detected_at", "scan_mode", "daily_data_source", "h4_context_source", "source_radar", "source_timeframe"]
     with (OUTPUT_DIR / "dxdx_signals.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(signal.to_dict() for signal in signals)
-    diagnostic_fields = [
-        "symbol", "h4_signal_time", "h4_open", "h4_high", "h4_low", "h4_close",
-        "daily_bar_date", "daily_close", "dif", "dea", "macd_bar", "ccc", "jjj",
-        "dxdx", "blue_above_yellow", "daily_fresh_for_h4", "daily_context_source",
-    ]
-    with (OUTPUT_DIR / "h4_dxdx_diagnostics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=diagnostic_fields)
-        writer.writeheader()
-        writer.writerows(
-            item.to_dict()
-            for item in sorted(diagnostics or [], key=lambda item: (item.h4_signal_time, item.symbol))
-        )
-    daily_fields = ["symbol", "session", "scan_mode", "official_daily_fresh", "official_daily_source", "official_history_bars", "open", "high", "low", "close", "DIFF", "DEA", "MACD", "N1", "MM1", "CC1", "CC2", "CC3", "DIFL1", "DIFL2", "DIFL3", "AAA", "BBB", "CCC", "JJJ_prev", "JJJ", "DXDX", "matched_h4_same_session", "final_level"]
+    daily_fields = ["symbol", "session", "scan_mode", "official_daily_fresh", "official_daily_source", "official_history_bars", "open", "high", "low", "close", "DIFF", "DEA", "MACD", "N1", "MM1", "CC1", "CC2", "CC3", "DIFL1", "DIFL2", "DIFL3", "AAA", "BBB", "CCC", "JJJ_prev", "JJJ", "DXDX", "BLUE_UP", "BLUE_DW", "YELLOW_UP", "YELLOW_DW", "BLUE_ABOVE_YELLOW", "final_signal", "matched_h4_same_session", "final_level"]
     with (OUTPUT_DIR / "daily_dxdx_diagnostics.csv").open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=daily_fields); writer.writeheader()
         writer.writerows(item.to_dict() for item in daily_diagnostics or [])
-    counts = {level: sum(signal.signal_level == level for signal in signals) for level in ("S", "A", "B")}
+    daily_count = sum(signal.signal_level == "DAILY" for signal in signals)
     lines = [
-        "【美股双周期抄底雷达】",
+        "【美股日线抄底雷达】",
         f"股票池数量：{stats.pool_count}",
         f"成功取数数量：{stats.fetched_count}",
         f"数据失败数量：{stats.failed_count}",
-        f"4H候选日线未就绪数量：{stats.stale_daily_h4_count}",
-        f"S级数量：{counts['S']}",
-        f"A级数量：{counts['A']}",
-        f"B级数量：{counts['B']}",
+        f"日线DXDX信号数量：{daily_count}",
         f"邮件是否发送：{'是' if email_sent else '否'}",
         f"检测时间：{detected_at.isoformat()}",
     ]
@@ -105,35 +89,8 @@ def write_reports(
 
 
 def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool = False) -> tuple[list[Signal], ScanStats, bool]:
-    started = datetime.now()
-    diagnostics: list[H4Diagnostic] = []
-    signals, stats = run_screener(
-        symbols,
-        require_strict_separation=cfg["strict_separation"],
-        max_workers=cfg["max_workers"],
-        diagnostics=diagnostics,
-    )
-    new_signals = state.filter_new(signals)
-    if dry_run:
-        write_reports(new_signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
-        return new_signals, stats, False
-    if not new_signals:
-        log.info("No new DXDX signals; email skipped.")
-        write_reports(signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
-        state.save()
-        return signals, stats, False
-    if dry_run:
-        log.info("Dry run: %s new DXDX signal(s); email skipped.", len(new_signals))
-        write_reports(new_signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
-        return new_signals, stats, False
-    require_smtp_config(cfg)
-    subject, body = format_signals_email(new_signals, pool_count=stats.pool_count, scan_time=started)
-    send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], subject, body)
-    for signal in new_signals:
-        state.mark_sent(signal)
-    state.save()
-    write_reports(new_signals, stats, email_sent=True, detected_at=started, diagnostics=diagnostics)
-    return new_signals, stats, True
+    """Backward-compatible production entry point, now daily confirmation only."""
+    return run_confirmation(cfg, symbols, state, dry_run=dry_run)
 
 
 def send_test_email(cfg: dict) -> None:
@@ -159,19 +116,17 @@ def confirmation_session_times(now: datetime, count: int = CONFIRM_LOOKBACK_SESS
 def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool = False, now: datetime | None = None) -> tuple[list[Signal], ScanStats, bool]:
     """Official-1D catch-up for five completed XNYS sessions.
 
-    ``run_screener`` is evaluated at each session close, so its existing
-    session-aware 4H lookup is historical rather than tied to wall-clock now.
+    Only Yahoo's official 1D bars participate in signal production.
     """
     sessions = [pd.Timestamp(item) for item in confirmation_session_times(now or datetime.now().astimezone())]
     all_signals, total, daily_rows = run_confirmation_screener(symbols, sessions, require_strict_separation=cfg["strict_separation"], max_workers=cfg["max_workers"])
-    all_diagnostics: list[H4Diagnostic] = []
     new_signals = state.filter_new(all_signals)
     started = now or datetime.now()
-    if dry_run:  # unreachable: retained guard
-        write_reports(new_signals, total, email_sent=False, detected_at=started, diagnostics=all_diagnostics, daily_diagnostics=daily_rows)
+    if dry_run:
+        write_reports(new_signals, total, email_sent=False, detected_at=started, daily_diagnostics=daily_rows)
         return new_signals, total, False
     if not new_signals:
-        write_reports([], total, email_sent=False, detected_at=started, diagnostics=all_diagnostics, daily_diagnostics=daily_rows)
+        write_reports([], total, email_sent=False, detected_at=started, daily_diagnostics=daily_rows)
         state.save()
         return [], total, False
     require_smtp_config(cfg)
@@ -180,7 +135,7 @@ def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_ru
     for signal in new_signals:
         state.mark_sent(signal)
     state.save()
-    write_reports(new_signals, total, email_sent=True, detected_at=started, diagnostics=all_diagnostics, daily_diagnostics=daily_rows)
+    write_reports(new_signals, total, email_sent=True, detected_at=started, daily_diagnostics=daily_rows)
     return new_signals, total, True
 
 
@@ -206,7 +161,7 @@ def replay_daily(symbol: str, date: str) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="US daily/4H DXDX pullback radar")
+    parser = argparse.ArgumentParser(description="US official-daily DXDX pullback radar")
     parser.add_argument("--dry-run", action="store_true", help="scan without emailing or updating alert state")
     parser.add_argument("--test-email", action="store_true", help="send one Gmail SMTP connectivity test")
     parser.add_argument("--confirm-daily", action="store_true", help="confirm official daily DXDX over five XNYS sessions")
@@ -226,7 +181,7 @@ def main() -> None:
     if args.confirm_daily:
         run_confirmation(config, get_universe(), AlertState(), dry_run=args.dry_run)
         return
-    run_once(config, get_universe(), AlertState(), dry_run=args.dry_run)
+    run_confirmation(config, get_universe(), AlertState(), dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

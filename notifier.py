@@ -43,23 +43,16 @@ def send_email(smtp_host: str, smtp_port: int, smtp_user: str, smtp_password: st
 
 
 def format_signals_email(signals: list, *, pool_count: int, scan_time: datetime | None = None) -> tuple[str, str]:
-    """Keep the alert short and Chinese-first; code symbols remain English."""
+    """Format official-daily-only DXDX alerts."""
     scan_time = scan_time or datetime.now()
-    grouped = {level: [signal for signal in signals if signal.signal_level == level] for level in ("S", "A", "B")}
-    subject = f"【美股双周期抄底雷达】S{len(grouped['S'])} A{len(grouped['A'])} B{len(grouped['B'])}｜{scan_time:%Y-%m-%d}"
-    labels = {"S": "🥇 S级｜双周期共振", "A": "🟢 A级｜4H抄底", "B": "🔵 B级｜日线抄底"}
-    lines = ["【美股双周期抄底雷达】", "", "🔥 今日新信号", ""]
-    for level in ("S", "A", "B"):
-        for signal in grouped[level]:
-            lines.extend([labels[level], signal.symbol])
-            if signal.daily_dxdx:
-                lines.append("日线：DXDX")
-            if signal.h4_dxdx:
-                lines.append("4H：DXDX")
-            lines.extend(["趋势：蓝梯 > 黄梯", f"收盘价：${signal.close:.2f}", ""])
+    daily = [signal for signal in signals if signal.daily_dxdx]
+    subject = f"【美股日线抄底雷达】日{len(daily)}｜{scan_time:%Y-%m-%d}"
+    lines = ["【美股日线抄底雷达】", "", "🔥 新的 official daily DXDX 信号", ""]
+    for signal in daily:
+        lines.extend(["🔵 日线抄底", signal.symbol, "日线：DXDX", "趋势：蓝梯 > 黄梯", f"收盘价：${signal.close:.2f}", ""])
     lines.extend([
-        f"一句话：今日扫描 {pool_count} 只美股，发现 S级 {len(grouped['S'])} 只、A级 {len(grouped['A'])} 只、B级 {len(grouped['B'])} 只。",
-        f"数据时间：{scan_time:%Y-%m-%d} 美股收盘后",
+        f"一句话：本次扫描 {pool_count} 只美股，发现日线 DXDX {len(daily)} 只。",
+        f"数据时间：{scan_time:%Y-%m-%d} official daily 确认后",
         "仅供研究参考，不构成投资建议。",
     ])
     return subject, "\n".join(lines) + "\n"

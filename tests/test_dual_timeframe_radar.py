@@ -307,7 +307,7 @@ class DualTimeframeRadarTests(unittest.TestCase):
             self.assertTrue(state.is_new(signal(moment=datetime(2026, 9, 8, 16, 0, tzinfo=ET))))
 
     def test_no_signal_skips_email_and_writes_reports(self):
-        with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)), patch("main.run_screener", return_value=([], ScanStats(pool_count=3, fetched_count=3))), patch("main.send_email") as sent:
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)), patch("main.run_confirmation_screener", return_value=([], ScanStats(pool_count=3, fetched_count=3), [])), patch("main.send_email") as sent:
             main.run_once({"strict_separation": False, "max_workers": 1}, ["AMD"], AlertState(Path(directory) / "state.json"))
             sent.assert_not_called()
             self.assertTrue((Path(directory) / "dxdx_report.txt").exists())
@@ -333,9 +333,9 @@ class DualTimeframeRadarTests(unittest.TestCase):
         self.assertIn("send", calls)
 
     def test_chinese_email_contains_signal_levels(self):
-        _, body = notifier.format_signals_email([signal(daily=True, h4=True), signal("NVDA", h4=True)], pool_count=2, scan_time=NOW)
-        self.assertIn("S级｜双周期共振", body)
-        self.assertIn("A级｜4H抄底", body)
+        _, body = notifier.format_signals_email([signal(daily=True)], pool_count=1, scan_time=NOW)
+        self.assertIn("日线抄底", body)
+        self.assertNotIn("4H", body)
         self.assertIn("趋势：蓝梯 > 黄梯", body)
 
     def test_one_symbol_failure_does_not_abort_scan(self):
@@ -345,35 +345,57 @@ class DualTimeframeRadarTests(unittest.TestCase):
         self.assertEqual(stats.failed_count, 1)
         self.assertEqual(stats.fetched_count, 1)
 
-    def test_confirmation_fetches_each_source_once_and_reuses_it_for_sessions(self):
+    def test_confirmation_fetches_official_daily_once_and_never_fetches_hourly(self):
         daily = daily_frame(dxdx=True)
         daily[["DIF", "DEA", "MACD_bar", "N1", "MM1"]] = [1.1, 0.9, 0.4, 3, 7]
-        h4 = h4_frame(second_today=True)
         sessions = [pd.Timestamp(NOW - pd.Timedelta(days=offset)) for offset in range(5)]
-        with patch("screener.fetch_daily", return_value=daily) as daily_fetch, patch("screener.fetch_hourly", return_value=pd.DataFrame()) as hourly_fetch, patch("screener.resample_to_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+        with patch("screener.fetch_daily", return_value=daily) as daily_fetch, patch("screener.fetch_hourly") as hourly_fetch, patch("screener.resample_to_4h") as resample, patch("screener.add_all_indicators", side_effect=lambda frame: frame):
             signals, diagnostics = screener.check_symbol_confirmation("AMD", sessions)
         self.assertEqual(daily_fetch.call_count, 1)
-        self.assertEqual(hourly_fetch.call_count, 1)
+        hourly_fetch.assert_not_called()
+        resample.assert_not_called()
         self.assertEqual(len(diagnostics), 5)
         self.assertEqual(diagnostics[0].official_daily_source, "yahoo_official_daily")
         self.assertTrue(diagnostics[0].DXDX)
-        self.assertEqual(signals[0].signal_level, "S")
+        self.assertEqual(signals[0].signal_level, "DAILY")
+        self.assertFalse(signals[0].h4_dxdx)
 
     def test_confirmation_daily_diagnostic_never_uses_h4_fallback(self):
         daily = daily_frame(dxdx=False)
-        h4 = h4_frame(second_today=True)
-        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_hourly", return_value=pd.DataFrame()), patch("screener.resample_to_4h", return_value=h4), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+        with patch("screener.fetch_daily", return_value=daily), patch("screener.fetch_hourly") as hourly_fetch, patch("screener.add_all_indicators", side_effect=lambda frame: frame):
             signals, diagnostics = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)])
         self.assertEqual(signals, [])
         self.assertFalse(diagnostics[0].DXDX)
-        self.assertTrue(diagnostics[0].matched_h4_same_session)
+        self.assertFalse(diagnostics[0].matched_h4_same_session)
         self.assertEqual(diagnostics[0].official_daily_source, "yahoo_official_daily")
+        hourly_fetch.assert_not_called()
+
+    def test_confirmation_requires_daily_dxdx_and_blue_above_yellow(self):
+        for dxdx, bullish in ((False, True), (True, False)):
+            with self.subTest(dxdx=dxdx, bullish=bullish), patch("screener.fetch_daily", return_value=daily_frame(dxdx=dxdx, bullish=bullish)), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+                signals, _ = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)])
+            self.assertEqual(signals, [])
+
+    def test_confirmation_signal_is_daily_and_old_h4_state_does_not_block_it(self):
+        with patch("screener.fetch_daily", return_value=daily_frame(dxdx=True)), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
+            signals, _ = screener.check_symbol_confirmation("AMD", [pd.Timestamp(NOW)])
+        item = signals[0]
+        self.assertEqual(item.signal_level, "DAILY")
+        self.assertEqual(item.source_timeframe, "daily")
+        self.assertEqual(item.source_radar, "daily")
+        self.assertFalse(item.h4_dxdx)
+        self.assertIsNone(item.h4_signal_time)
+        self.assertEqual(item.to_dict()["signal_date"], NOW.date().isoformat())
+        with tempfile.TemporaryDirectory() as directory:
+            state = AlertState(Path(directory) / "state.json")
+            state.mark_sent(signal("AMD", h4=True, moment=NOW))
+            self.assertTrue(state.is_new(item))
 
     def test_dry_run_never_saves_or_marks_state_in_both_modes(self):
         cfg = {"strict_separation": False, "max_workers": 1}
         state = MagicMock()
         state.filter_new.return_value = []
-        with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)), patch("main.run_screener", return_value=([], ScanStats(pool_count=1))), patch("main.run_confirmation_screener", return_value=([], ScanStats(pool_count=1), [])):
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)), patch("main.run_confirmation_screener", return_value=([], ScanStats(pool_count=1), [])):
             main.run_once(cfg, ["AMD"], state, dry_run=True)
             main.run_confirmation(cfg, ["AMD"], state, dry_run=True, now=NOW)
         state.save.assert_not_called()
@@ -396,24 +418,26 @@ class DualTimeframeRadarTests(unittest.TestCase):
             csv_text = (Path(directory) / "dxdx_signals.csv").read_text(encoding="utf-8-sig")
             self.assertIn("signal_level", csv_text)
             self.assertIn("h4_signal_time", csv_text)
-            diagnostic_text = (Path(directory) / "h4_dxdx_diagnostics.csv").read_text(encoding="utf-8-sig")
-            self.assertIn("daily_fresh_for_h4", diagnostic_text)
-            self.assertIn("daily_context_source", diagnostic_text)
-            self.assertIn("macd_bar", diagnostic_text)
+            diagnostic_text = (Path(directory) / "daily_dxdx_diagnostics.csv").read_text(encoding="utf-8-sig")
+            self.assertIn("official_daily_source", diagnostic_text)
+            self.assertIn("BLUE_ABOVE_YELLOW", diagnostic_text)
+            self.assertFalse((Path(directory) / "h4_dxdx_diagnostics.csv").exists())
             self.assertTrue((Path(directory) / "dxdx_report.txt").exists())
 
     def test_workflow_is_daily_not_half_hourly(self):
         workflow = Path(".github/workflows/screen.yml").read_text(encoding="utf-8")
-        self.assertIn('cron: "30 22 * * 1-5"', workflow)
+        self.assertNotIn('cron: "30 22 * * 1-5"', workflow)
+        self.assertIn('cron: "0 8 * * 2-6"', workflow)
         self.assertNotIn("*/30", workflow)
         self.assertIn("dxdx_signals.csv", workflow)
-        self.assertIn("h4_dxdx_diagnostics.csv", workflow)
+        self.assertNotIn("h4_dxdx_diagnostics.csv", workflow)
 
     def test_readme_matches_levels_and_independent_design(self):
         readme = Path("README.md").read_text(encoding="utf-8")
-        self.assertIn("S级：双周期共振", readme)
-        self.assertIn("A级：4H 抄底", readme)
-        self.assertIn("B级：日线抄底", readme)
+        self.assertIn("official daily DXDX", readme)
+        self.assertNotIn("S级：双周期共振", readme)
+        self.assertNotIn("A级：4H 抄底", readme)
+        self.assertNotIn("B级：日线抄底", readme)
         self.assertIn("完全独立", readme)
         self.assertNotIn("每 30 分钟", readme)
 

@@ -1,9 +1,8 @@
-name: US Dual-Timeframe DXDX Pullback Radar
+name: US Daily DXDX Pullback Radar
 
 on:
   schedule:
-    # Weekdays, after the US regular session and Yahoo finalisation window.
-    - cron: "30 22 * * 1-5"
+    # Before the next US open, after Yahoo's official daily finalisation window.
     - cron: "0 8 * * 2-6"
   workflow_dispatch:
     inputs:
@@ -58,10 +57,8 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.test_email }}" = "true" ]; then
             python main.py --test-email
-          elif [ "${{ github.event.schedule }}" = "0 8 * * 2-6" ] || [ "${{ github.event.inputs.confirm_daily }}" = "true" ]; then
-            python main.py --confirm-daily ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
           else
-            python main.py
+            python main.py --confirm-daily ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
           fi
       - name: Save alert state
         if: always() && github.event.inputs.test_email != 'true' && github.event.inputs.dry_run != 'true' && hashFiles('alert_state.json') != ''
@@ -77,6 +74,5 @@ jobs:
           path: |
             output/dxdx_signals.csv
             output/dxdx_report.txt
-            output/h4_dxdx_diagnostics.csv
             output/daily_dxdx_diagnostics.csv
           if-no-files-found: warn
