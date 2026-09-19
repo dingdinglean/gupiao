@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -228,9 +229,17 @@ def _daily_diagnostic(
     )
 
 
-def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], raw_daily: pd.DataFrame, *, require_strict_separation: bool = False) -> tuple[list[Signal], list[DailyDiagnostic]]:
+def check_symbol_confirmation(
+    symbol: str,
+    session_dates: list[pd.Timestamp],
+    raw_daily: pd.DataFrame,
+    *,
+    require_strict_separation: bool = False,
+    symbol_validator: Callable[[str], bool] = is_us_listed_stock,
+    source_radar: str = "daily",
+) -> tuple[list[Signal], list[DailyDiagnostic]]:
     """Evaluate already-fetched official 1D bars locally; never fetch Yahoo."""
-    if not is_us_listed_stock(symbol): return [], []
+    if not symbol_validator(symbol): return [], []
     daily = add_all_indicators(raw_daily)
     signals: list[Signal] = []; diagnostics: list[DailyDiagnostic] = []
     index_dates = pd.DatetimeIndex(daily.index).tz_convert(NEW_YORK).normalize()
@@ -248,11 +257,20 @@ def check_symbol_confirmation(symbol: str, session_dates: list[pd.Timestamp], ra
         daily_ok = bool(row is not None and row.get("DXDX", False) and _trend_is_bullish(row, require_strict_separation))
         diagnostics.append(_daily_diagnostic(symbol, session, row, previous_row, len(daily), daily_ok, "official_daily_confirmation"))
         if daily_ok:
-            signals.append(Signal(symbol, "DAILY", True, False, _session_date(session).to_pydatetime(), None, float(row["close"]), True, datetime.now(tz=NEW_YORK), scan_mode="official_daily_confirmation", daily_data_source="yahoo_official_daily", h4_context_source=""))
+            signals.append(Signal(symbol, "DAILY", True, False, _session_date(session).to_pydatetime(), None, float(row["close"]), True, datetime.now(tz=NEW_YORK), scan_mode="official_daily_confirmation", daily_data_source="yahoo_official_daily", h4_context_source="", source_radar=source_radar))
     return signals, diagnostics
 
 
-def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timestamp], *, max_workers: int = 6, require_strict_separation: bool = False, batch_size: int = 50) -> tuple[list[Signal], ScanStats, list[DailyDiagnostic]]:
+def run_confirmation_screener(
+    symbols: list[str],
+    session_dates: list[pd.Timestamp],
+    *,
+    max_workers: int = 6,
+    require_strict_separation: bool = False,
+    batch_size: int = 50,
+    symbol_validator: Callable[[str], bool] = is_us_listed_stock,
+    source_radar: str = "daily",
+) -> tuple[list[Signal], ScanStats, list[DailyDiagnostic]]:
     """Batch-download official daily history, then evaluate five sessions locally.
 
     ``max_workers`` is intentionally retained for call compatibility.  Network
@@ -261,7 +279,7 @@ def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timesta
     """
     del max_workers
     started = time.perf_counter()
-    allowed = [s for s in symbols if is_us_listed_stock(s)]
+    allowed = [s for s in symbols if symbol_validator(s)]
     stats = ScanStats(pool_count=len(allowed), universe_count=len(allowed), batch_size=batch_size)
     metrics = BatchDailyFetchStats()
     daily_map = fetch_daily_batch(allowed, period="max", batch_size=batch_size, stats=metrics)
@@ -287,6 +305,8 @@ def run_confirmation_screener(symbols: list[str], session_dates: list[pd.Timesta
             found, rows = check_symbol_confirmation(
                 symbol, session_dates, raw_daily,
                 require_strict_separation=require_strict_separation,
+                symbol_validator=symbol_validator,
+                source_radar=source_radar,
             )
             signals.extend(found)
             diagnostics.extend(rows)

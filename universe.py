@@ -16,7 +16,12 @@ CACHE_DIR.mkdir(exist_ok=True)
 CACHE_TTL_SECONDS = 24 * 3600
 UA = "Mozilla/5.0 (compatible; USPullbackRadar/4.2)"
 US_TICKER = re.compile(r"^[A-Z]{1,5}(?:-[A-Z])?$")
-NON_STOCK_SYMBOLS = {"SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "XLK", "XLE", "XLV", "XLF", "GLD", "SLV", "USO", "IBIT", "BITO"}
+NON_STOCK_SYMBOLS = {
+    "SPY", "QQQ", "DIA", "IWM", "VOO", "VTI",
+    "XLK", "SOXX", "SMH", "XLC", "XLF", "XLE", "XLV", "XLI", "XLY",
+    "XLP", "XLU", "XLB", "XLRE",
+    "GLD", "SLV", "USO", "IBIT", "BITO",
+}
 
 # Audited emergency fallback: US-listed common stocks only, drawn from the
 # intended index universe. It is not a watchlist and is never expanded.

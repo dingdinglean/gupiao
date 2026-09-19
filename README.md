@@ -2,6 +2,18 @@
 
 这是一个完全独立运行的美股 DXDX 回调雷达：主雷达只在中长期多头趋势中寻找 **official daily DXDX** 日线底背离/回调结束信号。它不读取、不依赖任何其他仓库，也不使用 RSI 强势、板块排名或 watchlist 逻辑。
 
+## 独立 ETF Daily 雷达
+
+`python etf_main.py` 扫描固定的 17 只美国宽基与行业 ETF 白名单；
+`python etf_main.py --dry-run` 只生成 artifact，不发邮件，也不读取或写入正式 ETF
+state。ETF 雷达复用生产环境的 Yahoo official-daily batch fetch、
+`add_all_indicators()`、DXDX 与 `BLUE_ABOVE_YELLOW`，同时与 S&P 500 +
+Nasdaq-100 个股 universe、个股 state、个股邮件和周/月雷达保持隔离。
+
+ETF artifact 为 `output/etf_daily_signals.csv`、
+`output/etf_daily_report.txt` 和 `output/etf_daily_diagnostics.csv`；ETF 去重只使用
+`data/etf_daily_alert_state.json`。
+
 ## RTH 数据原则
 
 项目所有生产技术分析周期只使用美东时间 **09:30–16:00** 的美股正常交易时段（RTH）：日线、周线、月线均排除盘前、盘后、隔夜和其他 extended-hours 数据。日线以 `prepost=False` 获取并做防御性 RTH 确认；周/月只从这些 RTH 日K重采样，因此所有生产 OHLCV 和 DXDX、MACD、EMA 指标均基于正常交易时段成交。

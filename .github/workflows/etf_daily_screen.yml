@@ -1,0 +1,62 @@
+name: US ETF Daily DXDX Radar
+
+on:
+  schedule:
+    - cron: "0 8 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Do not send mail, restore state, or update state
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Restore ETF alert state
+        if: github.event.inputs.dry_run != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: data/etf_daily_alert_state.json
+          key: etf-daily-alert-state-${{ github.run_id }}
+          restore-keys: |
+            etf-daily-alert-state-
+      - name: Scan US ETFs
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          STRICT_BLUE_ABOVE: "false"
+          DAILY_BATCH_SIZE: "50"
+        run: python etf_main.py ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+      - name: Save ETF alert state
+        if: always() && github.event.inputs.dry_run != 'true' && hashFiles('data/etf_daily_alert_state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: data/etf_daily_alert_state.json
+          key: etf-daily-alert-state-${{ github.run_id }}
+      - name: Upload ETF Daily artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etf-daily-dxdx-radar
+          path: |
+            output/etf_daily_signals.csv
+            output/etf_daily_report.txt
+            output/etf_daily_diagnostics.csv
+          if-no-files-found: warn
