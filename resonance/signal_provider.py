@@ -42,7 +42,12 @@ def resample_to_unified_week(daily: pd.DataFrame) -> pd.DataFrame:
 
 
 class TimeframeSignalProvider:
-    """Produce daily/weekly observations through the existing indicator core."""
+    """Produce raw-DXDX daily/weekly collective-behaviour observations.
+
+    Daily EMA23/EMA89 state is retained only as ``trend_filter_pass``
+    diagnostics.  It is deliberately not an eligibility condition here; the
+    existing individual Daily v1 scanner owns that separate business rule.
+    """
 
     def __init__(self, config: ResonanceConfig):
         self.config = config
@@ -75,12 +80,10 @@ class TimeframeSignalProvider:
             if available > cutoff or (start is not None and signal_date < start):
                 continue
             trend = bool(row.get("BLUE_ABOVE_YELLOW", False))
-            if self.config.daily_signal_mode == "daily_v1" and not trend:
-                continue
             result.append(SignalObservation(
                 ticker=ticker.upper(), timeframe="daily", signal_date=signal_date,
                 available_date=available, close=float(row["close"]),
-                blue_above_yellow=trend,
+                trend_filter_pass=trend,
             ))
         return result
 
@@ -100,6 +103,6 @@ class TimeframeSignalProvider:
             result.append(SignalObservation(
                 ticker=ticker.upper(), timeframe="weekly", signal_date=week_end,
                 available_date=week_end + timedelta(days=1), close=float(row["close"]),
-                blue_above_yellow=None, weekly_id=_weekly_id(week_end),
+                trend_filter_pass=None, weekly_id=_weekly_id(week_end),
             ))
         return result

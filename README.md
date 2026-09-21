@@ -93,7 +93,7 @@ python long_main.py --dry-run
 
 仅供研究参考，不构成投资建议。
 
-## 全市场板块 / 主题共振引擎
+## 全市场板块 / 主题集体行为引擎
 
 `resonance_main.py` 在现有 DXDX/NXCD 指标函数之上增加配置驱动的聚合层，不修改
 `indicators.py`，也不改变现有个股、ETF、周/月雷达及其状态。主题与子组只在
@@ -101,7 +101,11 @@ python long_main.py --dry-run
 独立子组。
 
 数据流为：Yahoo official daily OHLCV → 原版日/周 DXDX → 个体观察 → 主题映射 →
-严格日期聚类 → 共振事件/状态 → 中文 HTML 邮件与独立历史。
+严格日期聚类 → 集体行为事件/状态 → 中文 HTML 邮件与独立历史。
+
+集体行为层只使用原始 DXDX Bottom 与时间聚类。`BLUE_ABOVE_YELLOW` 仅作为
+`trend_filter_pass` 附加诊断保存，绝不参与 ticker 资格、cluster、subgroup 或
+集体行为状态判断；原有 Individual Daily v1 的蓝黄过滤保持不变。
 
 - Daily：同一 XNYS 交易日为核心，整个 cluster 的最早和最晚信号最多相差 1 个
   交易日。该规则使用完整跨度而不是链式 freshness，因此 D0、D+1、D+2 不会被
@@ -112,8 +116,11 @@ python long_main.py --dry-run
   日历日内；这只是有限的低点区域对齐，不使用无限 freshness。
 - 证据：同时保留同步 ticker 数与独立 subgroup 数。同质 BTC 现货 ETF 无论四只
   还是更多，只贡献一个 `spot_etf` 子组。
-- 状态：内部保持英文枚举，所有邮件与预览通过配置显示为观察、日线共振、周线
-  共振、日周多周期共振和广泛共振。
+- 状态：内部保持英文枚举，所有邮件与预览通过配置显示为观察、日线集体抄底、
+  周线集体抄底、日周多周期集体抄底和广泛集体抄底。
+- 后续扩散：正式事件的同步成员、cluster 日期与独立 subgroup 永久保持不变；
+  后续 20 个交易日（Daily）或 8 周（Weekly）内首次出现的其他相关标的单独写入
+  `follow_up_signals`，不会倒灌进原始 cluster。
 
 本地预览：
 

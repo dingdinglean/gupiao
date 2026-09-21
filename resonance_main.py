@@ -37,11 +37,14 @@ def _flat_event(event, config) -> dict:
         "first_known_date": event.first_known_date.isoformat(),
         "state": event.state,
         "state_display_name": config.status_display_names[event.state],
-        "tickers": ",".join(event.tickers),
-        "subgroups": ",".join(event.subgroups),
+        "synchronous_tickers": ",".join(event.synchronous_tickers),
+        "synchronous_ticker_count": len(event.synchronous_tickers),
+        "synchronous_subgroups": ",".join(event.synchronous_subgroups),
+        "independent_subgroup_count": len(event.synchronous_subgroups),
         "weekly_id": event.weekly_id,
         "aligned_weekly_id": event.aligned_weekly_id,
         "etf_sync": f"{event.etf_signaled}/{event.etf_total}",
+        "follow_up_signals": json.dumps([item.to_dict() for item in event.follow_up_signals], ensure_ascii=False),
         **event.performance,
     }
 
@@ -59,7 +62,8 @@ def write_outputs(events, changes, observations, report: list[str], html_preview
     fields = [
         "event_id", "theme", "display_name", "timeframe", "cluster_center_date",
         "cluster_start_date", "cluster_end_date", "first_known_date", "state", "state_display_name",
-        "tickers", "subgroups", "weekly_id", "aligned_weekly_id", "etf_sync",
+        "synchronous_tickers", "synchronous_ticker_count", "synchronous_subgroups",
+        "independent_subgroup_count", "weekly_id", "aligned_weekly_id", "etf_sync", "follow_up_signals",
         "method", "baseline_date", "participant_count", "return_t1", "return_t3",
         "return_t5", "return_t10", "return_t20",
     ]
@@ -74,7 +78,7 @@ def write_outputs(events, changes, observations, report: list[str], html_preview
         change_payload.append(row)
     (OUTPUT_DIR / "resonance_changes.json").write_text(json.dumps(change_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     with (OUTPUT_DIR / "resonance_individual_signals.csv").open("w", newline="", encoding="utf-8-sig") as handle:
-        fields = ["ticker", "timeframe", "signal_date", "available_date", "close", "dxdx", "blue_above_yellow", "weekly_id"]
+        fields = ["ticker", "timeframe", "signal_date", "available_date", "close", "dxdx", "trend_filter_pass", "weekly_id"]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(item.to_dict() for item in observations)
@@ -123,14 +127,14 @@ def run(
         )
         sent = True
     report = [
-        "【全市场板块 / 主题共振引擎】",
+        "【全市场板块 / 主题集体行为引擎】",
         f"主题数量：{len(config.themes)}",
         f"标的数量：{len(config.tickers)}",
         f"成功取数：{len(daily_map)}",
         f"失败取数：{len(config.tickers) - len(daily_map)}",
         f"日线聚类容差（交易日）：{config.daily_tolerance}",
         f"周线聚类容差（周）：{config.weekly_tolerance}",
-        f"共振事件：{sum(event.state != 'WATCH' for event in events)}",
+        f"集体行为事件：{sum(event.state != 'WATCH' for event in events)}",
         f"通知变化：{len(changes)}",
         f"邮件发送：{'是' if sent else '否'}",
         f"历史逐日重建：{'是' if reconstruct else '否'}",
@@ -141,7 +145,7 @@ def run(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="全市场板块/主题共振引擎")
+    parser = argparse.ArgumentParser(description="全市场板块/主题集体行为引擎")
     parser.add_argument("--dry-run", action="store_true", help="不发邮件、不保存正式状态")
     parser.add_argument("--themes", help="逗号分隔的内部主题 ID；默认全部")
     parser.add_argument("--as-of", help="历史截至日期 YYYY-MM-DD")

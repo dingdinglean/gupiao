@@ -2,10 +2,11 @@
 
 from .config import ResonanceConfig, ThemeConfig, load_resonance_config
 from .engine import ResonanceEngine
-from .models import Evidence, ResonanceEvent, SignalCluster, SignalObservation
+from .models import Evidence, FollowUpSignal, ResonanceEvent, SignalCluster, SignalObservation
 
 __all__ = [
     "Evidence",
+    "FollowUpSignal",
     "ResonanceConfig",
     "ResonanceEngine",
     "ResonanceEvent",

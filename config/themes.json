@@ -5,16 +5,16 @@
     "multi_timeframe_alignment_calendar_days": 3,
     "minimum_resonance_subgroups": 2,
     "broad_resonance_subgroups": 3,
-    "daily_signal_mode": "dxdx",
-    "weekly_signal_mode": "dxdx",
+    "daily_follow_up_max_trading_days": 20,
+    "weekly_follow_up_max_weeks": 8,
     "history_forward_sessions": [1, 3, 5, 10, 20]
   },
   "status_display_names": {
     "WATCH": "观察",
-    "DAILY_RESONANCE": "日线共振",
-    "WEEKLY_RESONANCE": "周线共振",
-    "MULTI_TIMEFRAME_RESONANCE": "日周多周期共振",
-    "BROAD_RESONANCE": "广泛共振"
+    "DAILY_RESONANCE": "日线集体抄底",
+    "WEEKLY_RESONANCE": "周线集体抄底",
+    "MULTI_TIMEFRAME_RESONANCE": "日周多周期集体抄底",
+    "BROAD_RESONANCE": "广泛集体抄底"
   },
   "themes": {
     "semiconductor": {

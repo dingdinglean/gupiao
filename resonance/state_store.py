@@ -20,7 +20,8 @@ CHANGE_NAMES = {
     "UPGRADE": "级别升级",
     "TIMEFRAME_ADDED": "新增周期",
     "SUBGROUP_ADDED": "新增子组",
-    "ENHANCED": "共振增强",
+    "ENHANCED": "集体行为增强",
+    "FOLLOW_UP": "后续接力",
 }
 
 
@@ -76,6 +77,19 @@ class ResonanceStateStore:
         added_tickers = tuple(sorted(set(event.tickers) - old_tickers))
         if added_tickers:
             return ResonanceChange("ENHANCED", CHANGE_NAMES["ENHANCED"], event, previous_state=previous_state, added_tickers=added_tickers)
+        old_follow_ups = {
+            (item.get("ticker"), item.get("timeframe"), item.get("signal_date"))
+            for item in previous.get("follow_up_signals") or []
+        }
+        added_follow_ups = tuple(
+            item for item in event.follow_up_signals
+            if (item.ticker, item.timeframe, item.signal_date.isoformat()) not in old_follow_ups
+        )
+        if added_follow_ups:
+            return ResonanceChange(
+                "FOLLOW_UP", CHANGE_NAMES["FOLLOW_UP"], event,
+                previous_state=previous_state, added_follow_ups=added_follow_ups,
+            )
         return None
 
     def save(self) -> None:

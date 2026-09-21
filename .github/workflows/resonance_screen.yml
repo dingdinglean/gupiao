@@ -1,4 +1,4 @@
-name: 全市场板块主题共振引擎
+name: 全市场板块主题集体行为引擎
 
 on:
   schedule:
@@ -29,7 +29,7 @@ jobs:
         run: pip install -r requirements.txt
       - name: 运行全部自动测试
         run: python -m unittest discover -s tests -v
-      - name: 恢复共振状态
+      - name: 恢复集体行为状态
         if: github.event.inputs.dry_run != 'true'
         uses: actions/cache/restore@v4
         with:
@@ -46,13 +46,13 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           RESONANCE_BATCH_SIZE: "50"
         run: python resonance_main.py ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
-      - name: 保存共振状态
+      - name: 保存集体行为状态
         if: always() && github.event.inputs.dry_run != 'true' && hashFiles('data/resonance_state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: data/resonance_state.json
           key: resonance-state-${{ github.run_id }}
-      - name: 上传共振历史与邮件预览
+      - name: 上传集体行为历史与邮件预览
         if: always()
         uses: actions/upload-artifact@v4
         with:

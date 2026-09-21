@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from .cluster_builder import SignalClusterBuilder, natural_week_bounds
+from .cluster_builder import SignalClusterBuilder, natural_week_bounds, trading_day_distance
 from .config import ResonanceConfig
 from .mapper import ThemeMapper
-from .models import Evidence, ResonanceEvent, SignalCluster, SignalObservation
+from .models import Evidence, FollowUpSignal, ResonanceEvent, SignalCluster, SignalObservation
 
 
 def _first_resonance_known(cluster: SignalCluster, minimum: int) -> date:
@@ -60,6 +60,7 @@ class ResonanceEngine:
         # An aligned weekly cluster is represented by the richer daily event,
         # preventing duplicate notifications for one market low region.
         result = daily_events + [event for event in weekly_events if event.event_id not in aligned_weekly_ids]
+        self._attach_follow_ups(result, evidence)
         stamp = (now or datetime.now(timezone.utc)).isoformat()
         for event in result:
             event.created_at = event.created_at or stamp
@@ -101,3 +102,45 @@ class ResonanceEngine:
         week_start, week_end = natural_week_bounds(weekly.cluster_center_date)
         margin = timedelta(days=self.config.multi_alignment_days)
         return daily.cluster_end_date >= week_start - margin and daily.cluster_start_date <= week_end + margin
+
+    def _attach_follow_ups(self, events: list[ResonanceEvent], evidence: list[Evidence]) -> None:
+        """Attach later diffusion without mutating the synchronous cluster.
+
+        Follow-ups are intentionally separate from ``event.evidence``,
+        ``event.tickers``, ``event.subgroups`` and all cluster dates.  They
+        therefore cannot retroactively create, broaden or move an event.
+        """
+        for event in events:
+            if event.state == "WATCH":
+                continue
+            candidates: list[Evidence] = []
+            for item in evidence:
+                if item.theme_id != event.theme_id or item.observation.timeframe != event.timeframe:
+                    continue
+                if item.signal_date <= event.cluster_end_date or item.ticker in event.tickers:
+                    continue
+                if event.timeframe == "weekly":
+                    lag = (item.signal_date - event.cluster_end_date).days // 7
+                    eligible = self.config.weekly_tolerance < lag <= self.config.weekly_follow_up_max_weeks
+                else:
+                    lag = trading_day_distance(event.cluster_end_date, item.signal_date)
+                    eligible = self.config.daily_tolerance < lag <= self.config.daily_follow_up_max_trading_days
+                if eligible:
+                    candidates.append(item)
+            seen: set[tuple[str, date]] = set()
+            follow_ups: list[FollowUpSignal] = []
+            for item in sorted(candidates, key=lambda value: (value.signal_date, value.ticker)):
+                key = (item.ticker, item.signal_date)
+                if key in seen:
+                    continue
+                seen.add(key)
+                follow_ups.append(FollowUpSignal(
+                    ticker=item.ticker,
+                    subgroup_id=item.subgroup_id,
+                    subgroup_display_name=item.subgroup_display_name,
+                    role=item.role,
+                    timeframe=item.observation.timeframe,
+                    signal_date=item.signal_date,
+                    weekly_id=item.observation.weekly_id,
+                ))
+            event.follow_up_signals = tuple(follow_ups)

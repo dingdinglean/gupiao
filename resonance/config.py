@@ -38,8 +38,8 @@ class ResonanceConfig:
     multi_alignment_days: int
     minimum_subgroups: int
     broad_subgroups: int
-    daily_signal_mode: str
-    weekly_signal_mode: str
+    daily_follow_up_max_trading_days: int
+    weekly_follow_up_max_weeks: int
     forward_sessions: tuple[int, ...]
     status_display_names: dict[str, str]
     themes: dict[str, ThemeConfig]
@@ -83,8 +83,8 @@ def load_resonance_config(
         multi_alignment_days=int(engine["multi_timeframe_alignment_calendar_days"]),
         minimum_subgroups=int(engine["minimum_resonance_subgroups"]),
         broad_subgroups=int(engine["broad_resonance_subgroups"]),
-        daily_signal_mode=str(engine.get("daily_signal_mode", "dxdx")),
-        weekly_signal_mode=str(engine.get("weekly_signal_mode", "dxdx")),
+        daily_follow_up_max_trading_days=int(engine["daily_follow_up_max_trading_days"]),
+        weekly_follow_up_max_weeks=int(engine["weekly_follow_up_max_weeks"]),
         forward_sessions=tuple(int(value) for value in engine["history_forward_sessions"]),
         status_display_names=dict(raw["status_display_names"]),
         themes=themes,
