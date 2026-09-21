@@ -11,13 +11,15 @@ from email.message import EmailMessage
 log = logging.getLogger(__name__)
 
 
-def send_email(smtp_host: str, smtp_port: int, smtp_user: str, smtp_password: str, to_addrs: list[str], subject: str, body_text: str, *, retries: int = 1) -> None:
+def send_email(smtp_host: str, smtp_port: int, smtp_user: str, smtp_password: str, to_addrs: list[str], subject: str, body_text: str, *, html_body: str | None = None, retries: int = 1) -> None:
     """Use STARTTLS on 587 (Gmail) and implicit TLS on 465; retry once."""
     message = EmailMessage()
     message["From"] = smtp_user
     message["To"] = ", ".join(to_addrs)
     message["Subject"] = subject
     message.set_content(body_text)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:

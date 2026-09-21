@@ -92,3 +92,38 @@ python long_main.py --dry-run
 ```
 
 仅供研究参考，不构成投资建议。
+
+## 全市场板块 / 主题共振引擎
+
+`resonance_main.py` 在现有 DXDX/NXCD 指标函数之上增加配置驱动的聚合层，不修改
+`indicators.py`，也不改变现有个股、ETF、周/月雷达及其状态。主题与子组只在
+`config/themes.json` 维护；一个标的可以属于多个主题，但在同一主题中只能归入一个
+独立子组。
+
+数据流为：Yahoo official daily OHLCV → 原版日/周 DXDX → 个体观察 → 主题映射 →
+严格日期聚类 → 共振事件/状态 → 中文 HTML 邮件与独立历史。
+
+- Daily：同一 XNYS 交易日为核心，整个 cluster 的最早和最晚信号最多相差 1 个
+  交易日。该规则使用完整跨度而不是链式 freshness，因此 D0、D+1、D+2 不会被
+  连成一个 cluster。
+- Weekly：股票、ETF、指数锚与 24/7 资产统一映射到 ISO Monday–Sunday 自然周，
+  默认容差为 0；只有周日结束、到下一周一后才是正式完整周 K。
+- 日周对齐：Daily cluster 必须与 Weekly 自然周重叠，或落在该周前后配置的 3 个
+  日历日内；这只是有限的低点区域对齐，不使用无限 freshness。
+- 证据：同时保留同步 ticker 数与独立 subgroup 数。同质 BTC 现货 ETF 无论四只
+  还是更多，只贡献一个 `spot_etf` 子组。
+- 状态：内部保持英文枚举，所有邮件与预览通过配置显示为观察、日线共振、周线
+  共振、日周多周期共振和广泛共振。
+
+本地预览：
+
+```bash
+python resonance_main.py --dry-run
+python resonance_main.py --dry-run --themes semiconductor,bitcoin_crypto \
+  --reconstruct 2026-09-01 2026-09-22
+```
+
+历史重建按每个 `available_date` 逐日推进；日线信号只能在 official daily 完成后的
+下一日被使用，周线信号只能在整个自然周结束后的周一被使用。输出独立保存在
+`output/resonance_history.json`、`output/resonance_history.csv`，HTML 预览为
+`output/resonance_email_preview.html`。

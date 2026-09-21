@@ -1,0 +1,212 @@
+{
+  "engine": {
+    "daily_cluster_tolerance_trading_days": 1,
+    "weekly_cluster_tolerance_weeks": 0,
+    "multi_timeframe_alignment_calendar_days": 3,
+    "minimum_resonance_subgroups": 2,
+    "broad_resonance_subgroups": 3,
+    "daily_signal_mode": "dxdx",
+    "weekly_signal_mode": "dxdx",
+    "history_forward_sessions": [1, 3, 5, 10, 20]
+  },
+  "status_display_names": {
+    "WATCH": "观察",
+    "DAILY_RESONANCE": "日线共振",
+    "WEEKLY_RESONANCE": "周线共振",
+    "MULTI_TIMEFRAME_RESONANCE": "日周多周期共振",
+    "BROAD_RESONANCE": "广泛共振"
+  },
+  "themes": {
+    "semiconductor": {
+      "display_name": "半导体",
+      "groups": [
+        {"id": "phlx_etf", "display_name": "PHLX半导体ETF", "role": "etf", "tickers": ["SOXX", "SOXQ"]},
+        {"id": "concentrated_etf", "display_name": "集中型半导体ETF", "role": "etf", "tickers": ["SMH"]},
+        {"id": "equal_weight_etf", "display_name": "等权半导体ETF", "role": "etf", "tickers": ["XSD"]},
+        {"id": "gpu_compute", "display_name": "GPU/计算芯片", "role": "stock", "tickers": ["NVDA", "AMD", "AVGO"]},
+        {"id": "memory", "display_name": "存储芯片", "role": "stock", "tickers": ["MU", "WDC"]},
+        {"id": "equipment", "display_name": "半导体设备", "role": "stock", "tickers": ["AMAT", "LRCX", "KLAC", "ASML"]},
+        {"id": "foundry", "display_name": "晶圆制造", "role": "stock", "tickers": ["TSM", "INTC", "GFS"]},
+        {"id": "analog_comms", "display_name": "模拟/通信芯片", "role": "stock", "tickers": ["QCOM", "MRVL", "TXN", "ADI"]}
+      ]
+    },
+    "software": {"display_name": "软件", "groups": [
+      {"id": "etf", "display_name": "软件ETF", "role": "etf", "tickers": ["IGV", "XSW"]},
+      {"id": "enterprise", "display_name": "企业软件", "role": "stock", "tickers": ["MSFT", "ORCL", "CRM", "ADBE"]},
+      {"id": "data", "display_name": "数据软件", "role": "stock", "tickers": ["PLTR", "SNOW", "MDB"]}
+    ]},
+    "cybersecurity": {"display_name": "网络安全", "groups": [
+      {"id": "etf", "display_name": "网络安全ETF", "role": "etf", "tickers": ["CIBR", "HACK", "BUG"]},
+      {"id": "platforms", "display_name": "安全平台", "role": "stock", "tickers": ["PANW", "CRWD", "FTNT"]},
+      {"id": "identity_cloud", "display_name": "身份与云安全", "role": "stock", "tickers": ["ZS", "OKTA", "NET"]}
+    ]},
+    "banks": {"display_name": "银行", "groups": [
+      {"id": "etf", "display_name": "银行ETF", "role": "etf", "tickers": ["KBE", "KRE", "XLF"]},
+      {"id": "money_center", "display_name": "大型银行", "role": "stock", "tickers": ["JPM", "BAC", "C", "WFC"]},
+      {"id": "investment", "display_name": "投行", "role": "stock", "tickers": ["GS", "MS"]}
+    ]},
+    "insurance": {"display_name": "保险", "groups": [
+      {"id": "etf", "display_name": "保险ETF", "role": "etf", "tickers": ["KIE", "IAK"]},
+      {"id": "carriers", "display_name": "保险公司", "role": "stock", "tickers": ["BRK-B", "PGR", "CB", "AIG", "MET"]}
+    ]},
+    "biotechnology": {"display_name": "生物科技", "groups": [
+      {"id": "etf", "display_name": "生物科技ETF", "role": "etf", "tickers": ["XBI", "IBB"]},
+      {"id": "large_cap", "display_name": "大型生技", "role": "stock", "tickers": ["AMGN", "GILD", "REGN", "VRTX"]},
+      {"id": "innovation", "display_name": "创新生技", "role": "stock", "tickers": ["MRNA", "BNTX", "CRSP"]}
+    ]},
+    "medical_devices": {"display_name": "医疗器械", "groups": [
+      {"id": "etf", "display_name": "医疗器械ETF", "role": "etf", "tickers": ["IHI", "XHE"]},
+      {"id": "devices", "display_name": "器械公司", "role": "stock", "tickers": ["ABT", "MDT", "SYK", "BSX", "ISRG"]}
+    ]},
+    "oil_gas": {"display_name": "石油天然气", "groups": [
+      {"id": "etf", "display_name": "能源ETF", "role": "etf", "tickers": ["XLE", "XOP", "OIH"]},
+      {"id": "integrated", "display_name": "综合油气", "role": "stock", "tickers": ["XOM", "CVX"]},
+      {"id": "exploration", "display_name": "勘探生产", "role": "stock", "tickers": ["COP", "EOG", "OXY"]},
+      {"id": "services", "display_name": "油服", "role": "stock", "tickers": ["SLB", "HAL"]}
+    ]},
+    "utilities": {"display_name": "公用事业", "groups": [
+      {"id": "etf", "display_name": "公用事业ETF", "role": "etf", "tickers": ["XLU", "VPU"]},
+      {"id": "regulated", "display_name": "受监管电力", "role": "stock", "tickers": ["DUK", "SO", "AEP"]},
+      {"id": "growth_power", "display_name": "成长电力", "role": "stock", "tickers": ["NEE", "CEG", "VST"]}
+    ]},
+    "industrials": {"display_name": "工业", "groups": [
+      {"id": "etf", "display_name": "工业ETF", "role": "etf", "tickers": ["XLI", "VIS"]},
+      {"id": "conglomerates", "display_name": "工业集团", "role": "stock", "tickers": ["GE", "HON", "MMM"]},
+      {"id": "machinery", "display_name": "工程机械", "role": "stock", "tickers": ["CAT", "DE", "ETN"]}
+    ]},
+    "aerospace_defense": {"display_name": "航空航天与国防", "groups": [
+      {"id": "etf", "display_name": "航空国防ETF", "role": "etf", "tickers": ["ITA", "XAR", "PPA"]},
+      {"id": "defense", "display_name": "国防主机厂", "role": "stock", "tickers": ["LMT", "NOC", "RTX", "GD"]},
+      {"id": "commercial", "display_name": "商用航空", "role": "stock", "tickers": ["BA", "GE"]}
+    ]},
+    "consumer": {"display_name": "消费", "groups": [
+      {"id": "discretionary_etf", "display_name": "可选消费ETF", "role": "etf", "tickers": ["XLY", "VCR"]},
+      {"id": "staples_etf", "display_name": "必选消费ETF", "role": "etf", "tickers": ["XLP", "VDC"]},
+      {"id": "leaders", "display_name": "消费龙头", "role": "stock", "tickers": ["AMZN", "HD", "MCD", "PG", "KO"]}
+    ]},
+    "retail": {"display_name": "零售", "groups": [
+      {"id": "etf", "display_name": "零售ETF", "role": "etf", "tickers": ["XRT", "RTH"]},
+      {"id": "general", "display_name": "综合零售", "role": "stock", "tickers": ["WMT", "COST", "TGT"]},
+      {"id": "home", "display_name": "家居零售", "role": "stock", "tickers": ["HD", "LOW"]}
+    ]},
+    "reits": {"display_name": "房地产信托", "groups": [
+      {"id": "etf", "display_name": "房地产ETF", "role": "etf", "tickers": ["XLRE", "VNQ", "IYR"]},
+      {"id": "industrial_data", "display_name": "工业与数据中心REIT", "role": "stock", "tickers": ["PLD", "EQIX", "DLR"]},
+      {"id": "retail_tower", "display_name": "零售与通信REIT", "role": "stock", "tickers": ["O", "SPG", "AMT"]}
+    ]},
+    "communications": {"display_name": "通信", "groups": [
+      {"id": "etf", "display_name": "通信ETF", "role": "etf", "tickers": ["XLC", "VOX"]},
+      {"id": "telecom", "display_name": "电信运营商", "role": "stock", "tickers": ["TMUS", "VZ", "T"]},
+      {"id": "media", "display_name": "媒体平台", "role": "stock", "tickers": ["META", "GOOGL", "NFLX"]}
+    ]},
+    "financials": {"display_name": "金融", "groups": [
+      {"id": "etf", "display_name": "金融ETF", "role": "etf", "tickers": ["XLF", "VFH"]},
+      {"id": "banks", "display_name": "银行", "role": "stock", "tickers": ["JPM", "BAC", "GS"]},
+      {"id": "payments", "display_name": "支付", "role": "stock", "tickers": ["V", "MA", "AXP"]}
+    ]},
+    "energy": {"display_name": "能源", "groups": [
+      {"id": "etf", "display_name": "能源ETF", "role": "etf", "tickers": ["XLE", "VDE"]},
+      {"id": "fossil", "display_name": "传统能源", "role": "stock", "tickers": ["XOM", "CVX", "COP"]},
+      {"id": "clean", "display_name": "清洁能源", "role": "stock", "tickers": ["FSLR", "ENPH", "NEE"]}
+    ]},
+    "materials": {"display_name": "材料", "groups": [
+      {"id": "etf", "display_name": "材料ETF", "role": "etf", "tickers": ["XLB", "VAW"]},
+      {"id": "chemicals", "display_name": "化工", "role": "stock", "tickers": ["LIN", "APD", "SHW"]},
+      {"id": "mining", "display_name": "矿业", "role": "stock", "tickers": ["FCX", "NEM", "SCCO"]}
+    ]},
+    "healthcare": {"display_name": "医疗保健", "groups": [
+      {"id": "etf", "display_name": "医疗ETF", "role": "etf", "tickers": ["XLV", "VHT"]},
+      {"id": "pharma", "display_name": "制药", "role": "stock", "tickers": ["LLY", "JNJ", "MRK", "PFE"]},
+      {"id": "services", "display_name": "医疗服务", "role": "stock", "tickers": ["UNH", "CI", "HCA"]}
+    ]},
+    "automobiles": {"display_name": "汽车", "groups": [
+      {"id": "etf", "display_name": "汽车ETF", "role": "etf", "tickers": ["CARZ", "DRIV"]},
+      {"id": "legacy", "display_name": "传统车企", "role": "stock", "tickers": ["F", "GM", "TM"]},
+      {"id": "ev", "display_name": "新能源汽车", "role": "stock", "tickers": ["TSLA", "RIVN", "LI"]}
+    ]},
+    "transportation": {"display_name": "运输", "groups": [
+      {"id": "etf", "display_name": "运输ETF", "role": "etf", "tickers": ["IYT", "XTN"]},
+      {"id": "rail", "display_name": "铁路", "role": "stock", "tickers": ["UNP", "CSX", "NSC"]},
+      {"id": "logistics", "display_name": "物流", "role": "stock", "tickers": ["UPS", "FDX"]},
+      {"id": "airlines", "display_name": "航空公司", "role": "stock", "tickers": ["DAL", "UAL", "LUV"]}
+    ]},
+    "artificial_intelligence": {"display_name": "人工智能", "groups": [
+      {"id": "etf", "display_name": "人工智能ETF", "role": "etf", "tickers": ["AIQ", "BOTZ", "ARTY"]},
+      {"id": "compute", "display_name": "AI算力", "role": "stock", "tickers": ["NVDA", "AMD", "AVGO"]},
+      {"id": "platform", "display_name": "AI平台", "role": "stock", "tickers": ["MSFT", "GOOGL", "META"]},
+      {"id": "applications", "display_name": "AI应用", "role": "stock", "tickers": ["PLTR", "CRM", "NOW"]}
+    ]},
+    "bitcoin_crypto": {"display_name": "比特币与加密资产", "groups": [
+      {"id": "anchor", "display_name": "锚定资产", "role": "anchor", "tickers": ["BTC-USD"]},
+      {"id": "spot_etf", "display_name": "现货ETF", "role": "etf", "tickers": ["IBIT", "FBTC", "ARKB", "BITB"]},
+      {"id": "related_companies", "display_name": "相关公司", "role": "stock", "tickers": ["MSTR", "COIN"]},
+      {"id": "miners", "display_name": "矿企", "role": "stock", "tickers": ["MARA", "RIOT", "CLSK", "IREN"]}
+    ]},
+    "nuclear_uranium": {"display_name": "核能与铀", "groups": [
+      {"id": "etf", "display_name": "铀ETF", "role": "etf", "tickers": ["URA", "URNM"]},
+      {"id": "uranium", "display_name": "铀矿", "role": "stock", "tickers": ["CCJ", "UEC", "UUUU"]},
+      {"id": "nuclear_power", "display_name": "核电", "role": "stock", "tickers": ["CEG", "VST", "BWXT"]},
+      {"id": "advanced", "display_name": "先进核能", "role": "stock", "tickers": ["OKLO", "SMR", "NNE"]}
+    ]},
+    "data_centers": {"display_name": "数据中心", "groups": [
+      {"id": "reit", "display_name": "数据中心REIT", "role": "stock", "tickers": ["EQIX", "DLR"]},
+      {"id": "power_cooling", "display_name": "电力与冷却", "role": "stock", "tickers": ["VRT", "ETN", "CEG"]},
+      {"id": "network", "display_name": "网络设备", "role": "stock", "tickers": ["ANET", "CSCO", "AVGO"]}
+    ]},
+    "electric_power": {"display_name": "电力", "groups": [
+      {"id": "etf", "display_name": "电力ETF", "role": "etf", "tickers": ["XLU", "VPU"]},
+      {"id": "generators", "display_name": "发电商", "role": "stock", "tickers": ["CEG", "VST", "NRG"]},
+      {"id": "grid", "display_name": "电网设备", "role": "stock", "tickers": ["GEV", "ETN", "PWR"]}
+    ]},
+    "robotics": {"display_name": "机器人", "groups": [
+      {"id": "etf", "display_name": "机器人ETF", "role": "etf", "tickers": ["BOTZ", "ROBO", "ARKQ"]},
+      {"id": "industrial", "display_name": "工业自动化", "role": "stock", "tickers": ["ROK", "TER", "EMR"]},
+      {"id": "medical", "display_name": "医疗机器人", "role": "stock", "tickers": ["ISRG", "SYK"]}
+    ]},
+    "cloud_computing": {"display_name": "云计算", "groups": [
+      {"id": "etf", "display_name": "云计算ETF", "role": "etf", "tickers": ["SKYY", "CLOU", "WCLD"]},
+      {"id": "hyperscalers", "display_name": "云平台", "role": "stock", "tickers": ["MSFT", "AMZN", "GOOGL", "ORCL"]},
+      {"id": "cloud_software", "display_name": "云软件", "role": "stock", "tickers": ["CRM", "NOW", "SNOW"]}
+    ]},
+    "gold": {"display_name": "黄金", "groups": [
+      {"id": "anchor", "display_name": "黄金锚定资产", "role": "anchor", "tickers": ["GC=F"]},
+      {"id": "etf", "display_name": "黄金ETF", "role": "etf", "tickers": ["GLD", "IAU"]},
+      {"id": "miners", "display_name": "金矿", "role": "stock", "tickers": ["NEM", "GOLD", "AEM"]}
+    ]},
+    "silver": {"display_name": "白银", "groups": [
+      {"id": "anchor", "display_name": "白银锚定资产", "role": "anchor", "tickers": ["SI=F"]},
+      {"id": "etf", "display_name": "白银ETF", "role": "etf", "tickers": ["SLV", "SIVR"]},
+      {"id": "miners", "display_name": "银矿", "role": "stock", "tickers": ["PAAS", "AG", "HL"]}
+    ]},
+    "electric_vehicles": {"display_name": "新能源汽车", "groups": [
+      {"id": "etf", "display_name": "新能源车ETF", "role": "etf", "tickers": ["DRIV", "IDRV", "LIT"]},
+      {"id": "automakers", "display_name": "新能源车企", "role": "stock", "tickers": ["TSLA", "RIVN", "LI", "NIO"]},
+      {"id": "battery", "display_name": "电池材料", "role": "stock", "tickers": ["ALB", "SQM"]}
+    ]},
+    "commercial_space": {"display_name": "商业航天", "groups": [
+      {"id": "etf", "display_name": "航天ETF", "role": "etf", "tickers": ["ARKX", "UFO"]},
+      {"id": "launch", "display_name": "发射服务", "role": "stock", "tickers": ["RKLB", "LUNR", "ASTS"]},
+      {"id": "satellite", "display_name": "卫星通信", "role": "stock", "tickers": ["IRDM", "GSAT"]}
+    ]},
+    "quantum_computing": {"display_name": "量子计算", "groups": [
+      {"id": "pure_play", "display_name": "量子计算公司", "role": "stock", "tickers": ["IONQ", "RGTI", "QBTS", "QUBT"]},
+      {"id": "platform", "display_name": "科技平台", "role": "stock", "tickers": ["IBM", "GOOGL", "MSFT"]}
+    ]},
+    "ai_infrastructure": {"display_name": "AI基础设施", "groups": [
+      {"id": "compute", "display_name": "计算芯片", "role": "stock", "tickers": ["NVDA", "AMD", "AVGO"]},
+      {"id": "network", "display_name": "高速网络", "role": "stock", "tickers": ["ANET", "MRVL", "COHR"]},
+      {"id": "power_cooling", "display_name": "电力与冷却", "role": "stock", "tickers": ["VRT", "ETN", "CEG"]},
+      {"id": "servers", "display_name": "服务器", "role": "stock", "tickers": ["DELL", "SMCI", "HPE"]}
+    ]},
+    "semiconductor_equipment": {"display_name": "半导体设备", "groups": [
+      {"id": "etf", "display_name": "半导体ETF", "role": "etf", "tickers": ["SOXX", "SMH", "XSD"]},
+      {"id": "wafer_equipment", "display_name": "晶圆设备", "role": "stock", "tickers": ["AMAT", "LRCX", "KLAC", "ASML"]},
+      {"id": "test_packaging", "display_name": "测试封装", "role": "stock", "tickers": ["TER", "ENTG", "AMKR"]}
+    ]},
+    "memory_chips": {"display_name": "存储芯片", "groups": [
+      {"id": "etf", "display_name": "半导体ETF", "role": "etf", "tickers": ["SOXX", "SMH"]},
+      {"id": "memory", "display_name": "存储厂商", "role": "stock", "tickers": ["MU", "WDC"]},
+      {"id": "equipment", "display_name": "存储设备供应链", "role": "stock", "tickers": ["LRCX", "AMAT"]}
+    ]}
+  }
+}

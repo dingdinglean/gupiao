@@ -4,4 +4,5 @@ __pycache__/
 .env
 alert_state.json
 data/etf_daily_alert_state.json
+data/resonance_state.json
 output/

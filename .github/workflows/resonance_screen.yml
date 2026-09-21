@@ -1,0 +1,67 @@
+name: 全市场板块主题共振引擎
+
+on:
+  schedule:
+    # Yahoo official daily finalisation 后；周线只使用已结束自然周。
+    - cron: "20 8 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 仅生成预览和历史文件，不发邮件或更新正式状态
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  resonance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 运行全部自动测试
+        run: python -m unittest discover -s tests -v
+      - name: 恢复共振状态
+        if: github.event.inputs.dry_run != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: data/resonance_state.json
+          key: resonance-state-${{ github.run_id }}
+          restore-keys: |
+            resonance-state-
+      - name: 扫描板块和主题
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          RESONANCE_BATCH_SIZE: "50"
+        run: python resonance_main.py ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
+      - name: 保存共振状态
+        if: always() && github.event.inputs.dry_run != 'true' && hashFiles('data/resonance_state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: data/resonance_state.json
+          key: resonance-state-${{ github.run_id }}
+      - name: 上传共振历史与邮件预览
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sector-theme-resonance
+          path: |
+            output/resonance_history.json
+            output/resonance_history.csv
+            output/resonance_changes.json
+            output/resonance_individual_signals.csv
+            output/resonance_report.txt
+            output/resonance_email_preview.html
+          if-no-files-found: warn
