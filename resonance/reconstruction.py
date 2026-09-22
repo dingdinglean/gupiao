@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timezone
 
 from .engine import ResonanceEngine
 from .models import ResonanceEvent, SignalObservation
@@ -25,8 +25,16 @@ class HistoricalReconstructor:
         history: dict[str, ResonanceEvent] = {}
         for current in knowledge_dates:
             visible = [item for item in observations if item.available_date <= current]
-            for event in self.engine.evaluate(visible):
+            replay_time = datetime.combine(current, time.min, tzinfo=timezone.utc)
+            for event in self.engine.evaluate(visible, now=replay_time):
                 if event.state != "WATCH" and start <= event.first_known_date <= end:
+                    previous = history.get(event.event_id)
+                    # Historical detected_at is the deterministic first
+                    # knowable timestamp for this event state.  Re-running in
+                    # another workflow timezone cannot move it.
+                    if previous and previous.state == event.state and previous.aligned_weekly_id == event.aligned_weekly_id:
+                        event.detected_at = previous.detected_at
+                        event.created_at = previous.created_at
                     history[event.event_id] = event
         result = sorted(history.values(), key=lambda item: (item.first_known_date, item.theme_id, item.cluster_center_date))
         for event in result:

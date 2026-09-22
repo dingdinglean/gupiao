@@ -95,6 +95,12 @@ python long_main.py --dry-run
 
 ## 全市场板块 / 主题集体行为引擎
 
+### Collective Behavior v1（已冻结）
+
+本节定义的业务规则冻结为 **Collective Behavior v1**。v1 不新增指标、评分或主题，
+不修改原版 DXDX、cluster tolerance、subgroup 去重和状态门槛。后续任何算法规则变化
+必须以 v2 单独实现并重新回测；v1 历史重建必须保持可重复。
+
 `resonance_main.py` 在现有 DXDX/NXCD 指标函数之上增加配置驱动的聚合层，不修改
 `indicators.py`，也不改变现有个股、ETF、周/月雷达及其状态。主题与子组只在
 `config/themes.json` 维护；一个标的可以属于多个主题，但在同一主题中只能归入一个
@@ -122,6 +128,20 @@ python long_main.py --dry-run
   后续 20 个交易日（Daily）或 8 周（Weekly）内首次出现的其他相关标的单独写入
   `follow_up_signals`，不会倒灌进原始 cluster。
 
+v1 严格区分市场日期和系统时间：
+
+- `signal_date` 是统一图表信号标签；`bar_date` 是源资产真实 K 线结束日期。日线二者
+  相同；周线使用 ISO Monday–Sunday 分组标签，同时保留股票/ETF 的最后实际交易日
+  和 BTC 的周日 bar date。
+- `cluster_start_date` / `cluster_end_date` 只描述同步信号的市场日期范围。
+- `effective_market_date` 是当前集体行为状态在市场 K 线层面满足条件的日期。所有
+  T+1/T+3/T+5/T+10/T+20 均以此字段为 T0，并按各标的真实后续行情行推进；周末
+  不会被当作股票/ETF 的交易日。
+- `detected_at` 是程序识别当前事件状态的时间戳；`notified_at` 只在通知成功后记录。
+  两者永远不得代替市场信号日期或绩效基准。
+- Weekly 另外保存 `weekly_signal_week` 与 `weekly_bar_end`。自然周负责 grouping，真实
+  bar end 与系统检测时间分别保存，不把周一运行时间伪装成周线信号日期。
+
 本地预览：
 
 ```bash
@@ -133,4 +153,5 @@ python resonance_main.py --dry-run --themes semiconductor,bitcoin_crypto \
 历史重建按每个 `available_date` 逐日推进；日线信号只能在 official daily 完成后的
 下一日被使用，周线信号只能在整个自然周结束后的周一被使用。输出独立保存在
 `output/resonance_history.json`、`output/resonance_history.csv`，HTML 预览为
-`output/resonance_email_preview.html`。
+`output/resonance_email_preview.html`。重建中的 `detected_at` 使用第一次可知日期的固定
+UTC 时间戳，因此不受执行机器或 workflow 时区影响；生产扫描则记录真实运行时间。

@@ -41,22 +41,56 @@ class ResonanceStateStore:
         except (OSError, json.JSONDecodeError):
             self.data = {"version": 1, "events": {}}
 
-    def apply(self, events: list[ResonanceEvent], *, notify_after: date | None = None) -> list[ResonanceChange]:
+    def apply(
+        self,
+        events: list[ResonanceEvent],
+        *,
+        notify_after: date | None = None,
+        detected_at: datetime | None = None,
+    ) -> list[ResonanceChange]:
         changes: list[ResonanceChange] = []
         stored = self.data.setdefault("events", {})
-        now = datetime.now(timezone.utc).isoformat()
+        now = (detected_at or datetime.now(timezone.utc)).isoformat()
         for event in events:
-            current = event.to_dict()
             previous = stored.get(event.event_id)
-            if previous:
-                current["created_at"] = previous.get("created_at") or current["created_at"]
-            current["updated_at"] = now
             change = self._change(previous, event)
+            same_state_version = False
+            if previous:
+                event.created_at = previous.get("created_at") or event.created_at
+                same_state_version = (
+                    previous.get("state") == event.state
+                    and previous.get("aligned_weekly_id", "") == event.aligned_weekly_id
+                )
+                if same_state_version:
+                    event.detected_at = previous.get("detected_at") or event.detected_at
+            if change and not same_state_version:
+                event.detected_at = now
+            if not change and previous:
+                event.notified_at = previous.get("notified_at", "")
+            elif change:
+                # A new state version has been detected but is not considered
+                # notified until the transport succeeds.
+                event.notified_at = ""
+            event.updated_at = now
+            current = event.to_dict()
+            current["updated_at"] = now
             stored[event.event_id] = current
             if change and (notify_after is None or event.first_known_date >= notify_after):
                 changes.append(change)
         self.data["updated_at"] = now
         return changes
+
+    def mark_notified(self, changes: list[ResonanceChange], *, notified_at: datetime | None = None) -> None:
+        """Persist the actual successful notification time for changed events."""
+        stamp = (notified_at or datetime.now(timezone.utc)).isoformat()
+        stored = self.data.setdefault("events", {})
+        for change in changes:
+            change.event.notified_at = stamp
+            current = stored.get(change.event.event_id)
+            if current is not None:
+                current["notified_at"] = stamp
+                current["updated_at"] = stamp
+        self.data["updated_at"] = stamp
 
     @staticmethod
     def _change(previous: dict | None, event: ResonanceEvent) -> ResonanceChange | None:

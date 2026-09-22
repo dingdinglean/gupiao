@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +13,7 @@ from resonance.config import load_resonance_config
 from resonance.engine import ResonanceEngine
 from resonance.mapper import ThemeMapper
 from resonance.models import ResonanceChange, SignalObservation
+from resonance.performance import calculate_event_performance
 from resonance.reconstruction import HistoricalReconstructor
 from resonance.renderer import format_resonance_email
 from resonance.signal_provider import TimeframeSignalProvider
@@ -25,6 +26,7 @@ def observation(
     timeframe: str = "daily",
     available: str | None = None,
     trend_filter_pass: bool | None = None,
+    bar_date: str | None = None,
 ) -> SignalObservation:
     signal_date = date.fromisoformat(day)
     return SignalObservation(
@@ -33,6 +35,7 @@ def observation(
         signal_date=signal_date,
         available_date=date.fromisoformat(available) if available else signal_date,
         close=100.0,
+        bar_date=date.fromisoformat(bar_date) if bar_date else signal_date,
         trend_filter_pass=trend_filter_pass,
         weekly_id=f"{signal_date.isocalendar().year}-W{signal_date.isocalendar().week:02d}" if timeframe == "weekly" else "",
     )
@@ -299,6 +302,104 @@ class ResonanceEngineTests(unittest.TestCase):
         self.assertEqual(len(events[0].subgroups), 2)
         self.assertEqual(events[0].etf_signaled, 3)
         self.assertEqual(events[0].etf_total, 4)
+
+    def test_friday_signal_and_saturday_workflow_keep_distinct_dates(self):
+        detected = datetime(2026, 9, 19, 8, 5, tzinfo=timezone(timedelta(hours=8)))
+        event = self.engine.evaluate([
+            observation("AMD", "2026-09-18", available="2026-09-19"),
+            observation("MU", "2026-09-18", available="2026-09-19"),
+        ], now=detected)[0]
+        self.assertEqual({item.signal_date for item in event.evidence}, {date(2026, 9, 18)})
+        self.assertEqual(event.effective_market_date, date(2026, 9, 18))
+        self.assertEqual(datetime.fromisoformat(event.detected_at).date(), date(2026, 9, 19))
+        _, text, _ = format_resonance_email([ResonanceChange("NEW", "新增", event)], [], self.config)
+        self.assertIn("市场正式成立：2026-09-18", text)
+        self.assertIn("系统发现：2026-09-19 08:05 +0800", text)
+
+    def test_broad_condition_effective_market_date_is_market_friday(self):
+        event = self.events([
+            observation("SOXX", "2026-09-17", available="2026-09-18"),
+            observation("SMH", "2026-09-17", available="2026-09-18"),
+            observation("AMAT", "2026-09-18", available="2026-09-19"),
+        ])[0]
+        self.assertEqual(event.state, "BROAD_RESONANCE")
+        self.assertEqual(event.cluster_end_date, date(2026, 9, 18))
+        self.assertEqual(event.effective_market_date, date(2026, 9, 18))
+        self.assertEqual(event.first_known_date, date(2026, 9, 19))
+
+    def test_forward_t1_starts_at_next_actual_market_session(self):
+        event = self.events([
+            observation("AMD", "2026-09-18"),
+            observation("MU", "2026-09-18"),
+        ])[0]
+        index = pd.to_datetime(["2026-09-18", "2026-09-21", "2026-09-22"])
+        frame = pd.DataFrame({"close": [100.0, 110.0, 120.0]}, index=index)
+        result = calculate_event_performance(event, {"AMD": frame, "MU": frame}, (1,))
+        self.assertEqual(result["baseline_date"], "2026-09-18")
+        self.assertEqual(result["baseline_field"], "effective_market_date")
+        self.assertEqual(result["return_t1"], 10.0)
+
+    def test_weekly_signal_week_bar_end_and_detection_are_separate(self):
+        detected = datetime(2026, 7, 13, 8, 0, tzinfo=timezone(timedelta(hours=8)))
+        event = self.engine.evaluate([
+            observation("BTC-USD", "2026-07-12", "weekly", available="2026-07-13", bar_date="2026-07-12"),
+            observation("IBIT", "2026-07-12", "weekly", available="2026-07-13", bar_date="2026-07-10"),
+        ], now=detected)[0]
+        self.assertEqual(event.weekly_signal_week, "2026-W28")
+        self.assertEqual(event.weekly_bar_end, date(2026, 7, 12))
+        self.assertEqual(event.effective_market_date, date(2026, 7, 12))
+        self.assertEqual(datetime.fromisoformat(event.detected_at).date(), date(2026, 7, 13))
+
+    def test_weekly_provider_preserves_crypto_and_equity_source_bar_dates(self):
+        btc_index = pd.date_range("2026-01-01", "2026-07-12", freq="D", tz="America/New_York")
+        ibit_index = pd.date_range("2026-01-01", "2026-07-10", freq="B", tz="America/New_York")
+
+        def frame(index):
+            return pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1.0}, index=index)
+
+        def no_daily(source):
+            result = source.copy()
+            result["DXDX"] = False
+            result["BLUE_ABOVE_YELLOW"] = False
+            return result
+
+        def last_weekly(source):
+            result = source.copy()
+            result["DXDX"] = False
+            result.iloc[-1, result.columns.get_loc("DXDX")] = True
+            return result
+
+        provider = TimeframeSignalProvider(self.config)
+        with patch("resonance.signal_provider.add_all_indicators", side_effect=no_daily), patch("resonance.signal_provider.compute_macd_divergence", side_effect=last_weekly):
+            values = provider.build({"BTC-USD": frame(btc_index), "IBIT": frame(ibit_index)}, as_of=date(2026, 7, 13), start=date(2026, 7, 1))
+        weekly = {item.ticker: item for item in values if item.timeframe == "weekly"}
+        self.assertEqual(weekly["BTC-USD"].signal_date, date(2026, 7, 12))
+        self.assertEqual(weekly["IBIT"].signal_date, date(2026, 7, 12))
+        self.assertEqual(weekly["BTC-USD"].bar_date, date(2026, 7, 12))
+        self.assertEqual(weekly["IBIT"].bar_date, date(2026, 7, 10))
+
+    def test_reconstruction_detection_is_timezone_independent(self):
+        values = [
+            observation("AMD", "2026-09-18", available="2026-09-19"),
+            observation("MU", "2026-09-18", available="2026-09-19"),
+        ]
+        first = HistoricalReconstructor(self.engine).reconstruct(values, {}, start=date(2026, 9, 1), end=date(2026, 9, 22))[0]
+        second = HistoricalReconstructor(self.engine).reconstruct(values, {}, start=date(2026, 9, 1), end=date(2026, 9, 22))[0]
+        self.assertEqual(first.detected_at, second.detected_at)
+        self.assertEqual(first.detected_at, "2026-09-19T00:00:00+00:00")
+        self.assertEqual(first.effective_market_date, date(2026, 9, 18))
+
+    def test_notified_at_is_only_set_after_successful_notification(self):
+        event = self.events([observation("AMD", "2026-09-18"), observation("MU", "2026-09-18")])[0]
+        detected = datetime(2026, 9, 19, 8, 0, tzinfo=timezone(timedelta(hours=8)))
+        notified = datetime(2026, 9, 19, 8, 1, tzinfo=timezone(timedelta(hours=8)))
+        with tempfile.TemporaryDirectory() as directory:
+            state = ResonanceStateStore(Path(directory) / "state.json")
+            changes = state.apply([event], detected_at=detected)
+            self.assertEqual(event.notified_at, "")
+            state.mark_notified(changes, notified_at=notified)
+        self.assertEqual(event.detected_at, detected.isoformat())
+        self.assertEqual(event.notified_at, notified.isoformat())
 
 
 if __name__ == "__main__":

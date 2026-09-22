@@ -25,10 +25,19 @@ class SignalObservation:
     available_date: date
     close: float
     dxdx: bool = True
+    # Actual source-market bar date.  For daily observations this equals
+    # signal_date.  Weekly signal_date is the unified Sunday week label while
+    # bar_date retains the source asset's real last bar (Friday for a normal
+    # US equity week, Sunday for a complete 24/7 crypto week).
+    bar_date: date | None = None
     # Diagnostic only.  Collective-behaviour eligibility is raw DXDX and
     # date alignment; this value must never be used by clustering or state.
     trend_filter_pass: bool | None = None
     weekly_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.bar_date is None:
+            object.__setattr__(self, "bar_date", self.signal_date)
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(asdict(self))
@@ -91,8 +100,13 @@ class FollowUpSignal:
     role: str
     timeframe: str
     signal_date: date
+    bar_date: date | None = None
     weekly_id: str = ""
     relation: str = "follow_up"
+
+    def __post_init__(self) -> None:
+        if self.bar_date is None:
+            object.__setattr__(self, "bar_date", self.signal_date)
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(asdict(self))
@@ -112,13 +126,17 @@ class ResonanceEvent:
     subgroups: tuple[str, ...]
     evidence: tuple[Evidence, ...]
     first_known_date: date
+    effective_market_date: date
     weekly_id: str = ""
+    weekly_bar_end: date | None = None
     aligned_weekly_id: str = ""
     aligned_week_start: date | None = None
     aligned_week_end: date | None = None
     etf_signaled: int = 0
     etf_total: int = 0
     follow_up_signals: tuple[FollowUpSignal, ...] = ()
+    detected_at: str = ""
+    notified_at: str = ""
     created_at: str = ""
     updated_at: str = ""
     performance: dict[str, Any] = field(default_factory=dict)
@@ -142,10 +160,15 @@ class ResonanceEvent:
     def synchronous_subgroups(self) -> tuple[str, ...]:
         return self.subgroups
 
+    @property
+    def weekly_signal_week(self) -> str:
+        return self.weekly_id
+
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result["synchronous_tickers"] = self.synchronous_tickers
         result["synchronous_subgroups"] = self.synchronous_subgroups
+        result["weekly_signal_week"] = self.weekly_signal_week
         return _serialize(result)
 
 

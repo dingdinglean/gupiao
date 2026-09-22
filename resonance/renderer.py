@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import html
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 from .config import ResonanceConfig
 from .models import Evidence, ResonanceChange, ResonanceEvent, SignalObservation
 
 
 ROLE_NAMES = {"anchor": "锚定资产", "etf": "ETF", "stock": "个股"}
+DISPLAY_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def _date_range(event: ResonanceEvent) -> str:
@@ -32,14 +33,29 @@ def _breadth(event: ResonanceEvent) -> str:
     return "广泛集体行为" if len(event.subgroups) >= 3 else "基础层集体行为"
 
 
+def _detected_label(event: ResonanceEvent) -> str:
+    if not event.detected_at:
+        return ""
+    try:
+        value = datetime.fromisoformat(event.detected_at).astimezone(DISPLAY_TIMEZONE)
+        return value.strftime("%Y-%m-%d %H:%M %z")
+    except ValueError:
+        return event.detected_at
+
+
 def _event_text(change: ResonanceChange, config: ResonanceConfig) -> list[str]:
     event = change.event
     state = config.status_display_names[event.state]
     lines = [f"🔥 {event.display_name}｜{state}"]
     if event.timeframe == "weekly":
         lines.append(f"集体行为周：{event.weekly_id}")
+        if event.weekly_bar_end:
+            lines.append(f"周线K线结束：{event.weekly_bar_end.isoformat()}")
     else:
         lines.append(f"集体行为日期：{_date_range(event)}")
+    lines.append(f"市场正式成立：{event.effective_market_date.isoformat()}")
+    if event.detected_at:
+        lines.append(f"系统发现：{_detected_label(event)}")
     if event.aligned_weekly_id:
         lines.append(f"对齐周线：{event.aligned_weekly_id}")
     for name, items in _group_evidence(event):
@@ -68,6 +84,11 @@ def _event_html(change: ResonanceChange, config: ResonanceConfig) -> str:
     event = change.event
     state = config.status_display_names[event.state]
     timing = f"集体行为周：{event.weekly_id}" if event.timeframe == "weekly" else f"集体行为日期：{_date_range(event)}"
+    if event.timeframe == "weekly" and event.weekly_bar_end:
+        timing += f"<br>周线K线结束：{event.weekly_bar_end.isoformat()}"
+    timing += f"<br>市场正式成立：{event.effective_market_date.isoformat()}"
+    if event.detected_at:
+        timing += f"<br>系统发现：{html.escape(_detected_label(event))}"
     if event.aligned_weekly_id:
         timing += f"<br>对齐周线：{html.escape(event.aligned_weekly_id)}"
     sections = []

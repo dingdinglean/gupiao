@@ -23,6 +23,7 @@ from resonance.state_store import ResonanceStateStore
 log = logging.getLogger("resonance-engine")
 OUTPUT_DIR = Path("output")
 STATE_PATH = Path("data/resonance_state.json")
+ENGINE_VERSION = "Collective Behavior v1"
 
 
 def _flat_event(event, config) -> dict:
@@ -34,7 +35,10 @@ def _flat_event(event, config) -> dict:
         "cluster_center_date": event.cluster_center_date.isoformat(),
         "cluster_start_date": event.cluster_start_date.isoformat(),
         "cluster_end_date": event.cluster_end_date.isoformat(),
+        "effective_market_date": event.effective_market_date.isoformat(),
         "first_known_date": event.first_known_date.isoformat(),
+        "detected_at": event.detected_at,
+        "notified_at": event.notified_at,
         "state": event.state,
         "state_display_name": config.status_display_names[event.state],
         "synchronous_tickers": ",".join(event.synchronous_tickers),
@@ -42,6 +46,8 @@ def _flat_event(event, config) -> dict:
         "synchronous_subgroups": ",".join(event.synchronous_subgroups),
         "independent_subgroup_count": len(event.synchronous_subgroups),
         "weekly_id": event.weekly_id,
+        "weekly_signal_week": event.weekly_signal_week,
+        "weekly_bar_end": event.weekly_bar_end.isoformat() if event.weekly_bar_end else "",
         "aligned_weekly_id": event.aligned_weekly_id,
         "etf_sync": f"{event.etf_signaled}/{event.etf_total}",
         "follow_up_signals": json.dumps([item.to_dict() for item in event.follow_up_signals], ensure_ascii=False),
@@ -61,10 +67,12 @@ def write_outputs(events, changes, observations, report: list[str], html_preview
     (OUTPUT_DIR / "resonance_history.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     fields = [
         "event_id", "theme", "display_name", "timeframe", "cluster_center_date",
-        "cluster_start_date", "cluster_end_date", "first_known_date", "state", "state_display_name",
+        "cluster_start_date", "cluster_end_date", "effective_market_date", "first_known_date",
+        "detected_at", "notified_at", "state", "state_display_name",
         "synchronous_tickers", "synchronous_ticker_count", "synchronous_subgroups",
-        "independent_subgroup_count", "weekly_id", "aligned_weekly_id", "etf_sync", "follow_up_signals",
-        "method", "baseline_date", "participant_count", "return_t1", "return_t3",
+        "independent_subgroup_count", "weekly_id", "weekly_signal_week", "weekly_bar_end",
+        "aligned_weekly_id", "etf_sync", "follow_up_signals",
+        "method", "baseline_date", "baseline_field", "participant_count", "return_t1", "return_t3",
         "return_t5", "return_t10", "return_t20",
     ]
     with (OUTPUT_DIR / "resonance_history.csv").open("w", newline="", encoding="utf-8-sig") as handle:
@@ -78,7 +86,7 @@ def write_outputs(events, changes, observations, report: list[str], html_preview
         change_payload.append(row)
     (OUTPUT_DIR / "resonance_changes.json").write_text(json.dumps(change_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     with (OUTPUT_DIR / "resonance_individual_signals.csv").open("w", newline="", encoding="utf-8-sig") as handle:
-        fields = ["ticker", "timeframe", "signal_date", "available_date", "close", "dxdx", "trend_filter_pass", "weekly_id"]
+        fields = ["ticker", "timeframe", "signal_date", "bar_date", "available_date", "close", "dxdx", "trend_filter_pass", "weekly_id"]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(item.to_dict() for item in observations)
@@ -111,7 +119,7 @@ def run(
     else:
         events = engine.evaluate(observations, now=started)
         state = ResonanceStateStore(STATE_PATH)
-        changes = state.apply(events, notify_after=cutoff - timedelta(days=10))
+        changes = state.apply(events, notify_after=cutoff - timedelta(days=10), detected_at=started)
         if not dry_run:
             state.save()
     recent = [item for item in observations if item.available_date == cutoff]
@@ -126,8 +134,11 @@ def run(
             smtp["to_addrs"], subject, body, html_body=html_preview,
         )
         sent = True
+        state.mark_notified(changes, notified_at=datetime.now().astimezone())
+        state.save()
     report = [
         "【全市场板块 / 主题集体行为引擎】",
+        f"版本：{ENGINE_VERSION}",
         f"主题数量：{len(config.themes)}",
         f"标的数量：{len(config.tickers)}",
         f"成功取数：{len(daily_map)}",

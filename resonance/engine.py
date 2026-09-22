@@ -17,6 +17,20 @@ def _first_resonance_known(cluster: SignalCluster, minimum: int) -> date:
     return cluster.first_known_date
 
 
+def _effective_market_date(cluster: SignalCluster, minimum: int) -> date:
+    """Market bar on which the required independent breadth was attained."""
+    subgroups: set[str] = set()
+    ordered = sorted(
+        cluster.evidence,
+        key=lambda value: (value.observation.bar_date or value.signal_date, value.signal_date, value.ticker),
+    )
+    for item in ordered:
+        subgroups.add(item.subgroup_id)
+        if len(subgroups) >= minimum:
+            return item.observation.bar_date or item.signal_date
+    return max(item.observation.bar_date or item.signal_date for item in cluster.evidence)
+
+
 class ResonanceEngine:
     def __init__(self, config: ResonanceConfig):
         self.config = config
@@ -57,12 +71,15 @@ class ResonanceEngine:
             daily_event.tickers = tuple(sorted({item.ticker for item in combined}))
             daily_event.subgroups = tuple(sorted({item.subgroup_id for item in combined}))
             daily_event.first_known_date = max(daily_event.first_known_date, weekly.first_known_date)
+            daily_event.effective_market_date = max(daily_event.effective_market_date, weekly.effective_market_date)
+            daily_event.weekly_bar_end = weekly.weekly_bar_end
         # An aligned weekly cluster is represented by the richer daily event,
         # preventing duplicate notifications for one market low region.
         result = daily_events + [event for event in weekly_events if event.event_id not in aligned_weekly_ids]
         self._attach_follow_ups(result, evidence)
         stamp = (now or datetime.now(timezone.utc)).isoformat()
         for event in result:
+            event.detected_at = stamp
             event.created_at = event.created_at or stamp
             event.updated_at = stamp
         return sorted(result, key=lambda item: (item.first_known_date, item.theme_id, item.timeframe, item.cluster_center_date))
@@ -79,6 +96,9 @@ class ResonanceEngine:
         theme = self.config.themes[cluster.theme_id]
         etf_total = sum(len(group.tickers) for group in theme.groups if group.role == "etf")
         etf_signaled = len({item.ticker for item in cluster.evidence if item.role == "etf"})
+        state_threshold = self.config.broad_subgroups if state == "BROAD_RESONANCE" else self.config.minimum_subgroups
+        if state == "WATCH":
+            state_threshold = 1
         suffix = cluster.cluster_start_date.isoformat() if cluster.timeframe == "daily" else (cluster.weekly_id or cluster.cluster_center_date.isoformat())
         return ResonanceEvent(
             event_id=f"{cluster.theme_id}:{cluster.timeframe}:{suffix}",
@@ -92,8 +112,13 @@ class ResonanceEngine:
             tickers=cluster.tickers,
             subgroups=subgroups,
             evidence=cluster.evidence,
-            first_known_date=_first_resonance_known(cluster, self.config.minimum_subgroups) if subgroup_count >= self.config.minimum_subgroups else cluster.first_known_date,
+            first_known_date=_first_resonance_known(cluster, state_threshold),
+            effective_market_date=_effective_market_date(cluster, state_threshold),
             weekly_id=cluster.weekly_id,
+            weekly_bar_end=max(
+                (item.observation.bar_date or item.signal_date for item in cluster.evidence),
+                default=None,
+            ) if cluster.timeframe == "weekly" else None,
             etf_signaled=etf_signaled,
             etf_total=etf_total,
         )
@@ -141,6 +166,7 @@ class ResonanceEngine:
                     role=item.role,
                     timeframe=item.observation.timeframe,
                     signal_date=item.signal_date,
+                    bar_date=item.observation.bar_date,
                     weekly_id=item.observation.weekly_id,
                 ))
             event.follow_up_signals = tuple(follow_ups)

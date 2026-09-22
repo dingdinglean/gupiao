@@ -32,13 +32,20 @@ def resample_to_unified_week(daily: pd.DataFrame) -> pd.DataFrame:
     """Map equities, ETFs, anchors and 24/7 assets to Monday-Sunday weeks."""
     if daily.empty or any(column not in daily.columns for column in OHLCV):
         return pd.DataFrame(columns=OHLCV)
-    return daily[OHLCV].sort_index().resample("W-SUN").agg({
+    ordered = daily[OHLCV].sort_index()
+    weekly = ordered.resample("W-SUN").agg({
         "open": "first",
         "high": "max",
         "low": "min",
         "close": "last",
         "volume": "sum",
     }).dropna(subset=["open", "high", "low", "close"])
+    # Keep the unified Sunday label for theme grouping, but retain the actual
+    # last source-market bar separately (Friday for US securities, Sunday for
+    # 24/7 crypto when that data is present).
+    source_bar_end = pd.Series(ordered.index, index=ordered.index).resample("W-SUN").last()
+    weekly["bar_date"] = source_bar_end.reindex(weekly.index).map(_date)
+    return weekly
 
 
 class TimeframeSignalProvider:
@@ -83,7 +90,7 @@ class TimeframeSignalProvider:
             result.append(SignalObservation(
                 ticker=ticker.upper(), timeframe="daily", signal_date=signal_date,
                 available_date=available, close=float(row["close"]),
-                trend_filter_pass=trend,
+                bar_date=signal_date, trend_filter_pass=trend,
             ))
         return result
 
@@ -103,6 +110,7 @@ class TimeframeSignalProvider:
             result.append(SignalObservation(
                 ticker=ticker.upper(), timeframe="weekly", signal_date=week_end,
                 available_date=week_end + timedelta(days=1), close=float(row["close"]),
-                trend_filter_pass=None, weekly_id=_weekly_id(week_end),
+                bar_date=_date(row["bar_date"]), trend_filter_pass=None,
+                weekly_id=_weekly_id(week_end),
             ))
         return result

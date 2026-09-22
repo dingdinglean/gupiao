@@ -20,7 +20,7 @@ def calculate_event_performance(
         if frame is None or frame.empty or "close" not in frame:
             continue
         dates = [pd.Timestamp(index).date() for index in frame.index]
-        baseline_positions = [index for index, value in enumerate(dates) if value <= event.first_known_date]
+        baseline_positions = [index for index, value in enumerate(dates) if value <= event.effective_market_date]
         if not baseline_positions:
             continue
         baseline_position = baseline_positions[-1]
@@ -34,7 +34,8 @@ def calculate_event_performance(
                 returns[period].append((float(future.iloc[period - 1]["close"]) / baseline - 1.0) * 100.0)
     result = {
         "method": "参与标的等权收益",
-        "baseline_date": event.first_known_date.isoformat(),
+        "baseline_date": event.effective_market_date.isoformat(),
+        "baseline_field": "effective_market_date",
         "participant_count": participant_count,
     }
     for period in forward_sessions:
