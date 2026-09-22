@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from session_calendar import expected_hourly_starts, nyse_session
+from session_calendar import expected_hourly_starts, nyse_session, nyse_trading_date_mask
 
 log = logging.getLogger(__name__)
 
@@ -164,14 +164,17 @@ def _daily_regular_session_only(df: pd.DataFrame) -> pd.DataFrame:
 
     out = _as_new_york_index(df)
     date_labelled = out.index == out.index.normalize()
-    keep = pd.Series(False, index=out.index)
-    for day, positions in out.groupby(out.index.normalize()).groups.items():
-        bounds = nyse_session(day)
-        if bounds is None:
-            continue
-        index = pd.DatetimeIndex(positions)
-        keep.loc[index] = date_labelled[out.index.get_indexer(index)] | ((index >= bounds.open) & (index <= bounds.close))
-    return out.loc[keep.to_numpy()]
+    keep = date_labelled.copy()
+    if bool(date_labelled.any()):
+        keep[date_labelled] = nyse_trading_date_mask(out.index[date_labelled])
+    # Official Yahoo daily data takes the vectorised path above.  Unexpected
+    # intraday rows remain subject to the exact per-session open/close bounds,
+    # preserving the defensive extended-hours rejection behaviour.
+    for position in (~date_labelled).nonzero()[0]:
+        timestamp = out.index[position]
+        bounds = nyse_session(timestamp)
+        keep[position] = bool(bounds is not None and bounds.open <= timestamp <= bounds.close)
+    return out.iloc[keep]
 
 
 def _normalize_official_daily(df: pd.DataFrame) -> pd.DataFrame:

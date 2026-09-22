@@ -177,6 +177,16 @@ class LongTimeframeRadarTests(unittest.TestCase):
         self.assertEqual(latest[0].date().isoformat(), "2026-09-04")
         self.assertTrue(latest[1]["DXDX"])
 
+    def test_latest_complete_bar_checks_from_newest_until_first_complete(self):
+        frame = bars(pd.date_range(end="2026-09-11", periods=5000, freq="W-FRI", tz=ET))
+        with patch(
+            "long_screener._bar_complete_at",
+            side_effect=[pd.Timestamp("2026-09-11 16:20", tz=ET), pd.Timestamp("2026-09-04 16:20", tz=ET)],
+        ) as completion:
+            latest = long_screener.latest_complete_long_bar(frame, "weekly", TUESDAY)
+        self.assertEqual(latest[0].date().isoformat(), "2026-09-04")
+        self.assertEqual(completion.call_count, 2)
+
     def test_friday_after_close_allows_current_week(self):
         frame = weekly_bars(final_dxdx=True)
         now = datetime(2026, 9, 11, 16, 20, tzinfo=ET)

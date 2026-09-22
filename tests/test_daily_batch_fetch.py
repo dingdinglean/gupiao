@@ -215,6 +215,21 @@ class DailyBatchFetchTests(unittest.TestCase):
         self.assertEqual(len(result), 5000)
         lookup.assert_not_called()
 
+    def test_strict_daily_filter_bulk_validates_midnight_sessions(self):
+        index = pd.DatetimeIndex([
+            pd.Timestamp("2026-01-01", tz=ET),  # NYSE holiday
+            pd.Timestamp("2026-01-02", tz=ET),  # NYSE session
+            pd.Timestamp("2026-01-03", tz=ET),  # Saturday
+        ])
+        source = pd.DataFrame(
+            {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 100.0},
+            index=index,
+        )
+        with patch("data_fetcher.nyse_session") as lookup:
+            result = data_fetcher._daily_regular_session_only(source)
+        self.assertEqual(list(result.index), [pd.Timestamp("2026-01-02", tz=ET)])
+        lookup.assert_not_called()
+
     def test_mixed_intraday_daily_still_drops_extended_row(self):
         index = pd.DatetimeIndex([
             pd.Timestamp("2026-09-08 00:00", tz=ET),

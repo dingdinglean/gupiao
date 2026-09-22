@@ -162,11 +162,13 @@ def latest_complete_long_bar(
         return None
     now_et = _as_new_york_time(now)
     index_et = _as_new_york_index(df.index)
-    complete = [position for position, label in enumerate(index_et) if _bar_complete_at(label, timeframe) <= now_et]
-    if not complete:
-        return None
-    position = complete[-1]
-    return pd.Timestamp(df.index[position]), df.iloc[position]
+    # Only the newest complete bar can be returned.  Walking backwards avoids
+    # thousands of historical exchange-calendar lookups for ``period=max``
+    # data while preserving the exact completion rule for the selected bar.
+    for position in range(len(index_et) - 1, -1, -1):
+        if _bar_complete_at(index_et[position], timeframe) <= now_et:
+            return pd.Timestamp(df.index[position]), df.iloc[position]
+    return None
 
 
 def _latest_daily_date(daily: pd.DataFrame) -> pd.Timestamp | None:

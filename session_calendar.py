@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
 
@@ -49,6 +50,38 @@ def _session_for_date_key(date_key: str) -> NYSESession | None:
 def nyse_session(day: pd.Timestamp | str) -> NYSESession | None:
     """Return the actual scheduled NYSE RTH bounds for ``day``, if open."""
     return _session_for_date_key(_date_key(day))
+
+
+@lru_cache(maxsize=256)
+def _session_dates_for_year(year: int) -> pd.DatetimeIndex:
+    """NYSE session dates for one year, cached for bulk daily validation."""
+    schedule = XNYS.schedule(
+        start_date=f"{year:04d}-01-01",
+        end_date=f"{year:04d}-12-31",
+    )
+    return pd.DatetimeIndex(schedule.index).normalize()
+
+
+def nyse_trading_date_mask(days: pd.Index) -> np.ndarray:
+    """Vectorised membership mask for midnight-labelled NYSE daily bars.
+
+    Fetching one exchange schedule per year is equivalent to calling
+    ``nyse_session`` for every date, including holidays, while avoiding the
+    cache churn caused by repeating decades of one-day schedule queries for
+    hundreds of symbols.
+    """
+    index = pd.DatetimeIndex(days)
+    if index.empty:
+        return index.isin(pd.DatetimeIndex([]))
+    if index.tz is not None:
+        index = index.tz_convert(NEW_YORK).tz_localize(None)
+    normalized = index.normalize()
+    yearly = [
+        _session_dates_for_year(year)
+        for year in sorted(set(int(value) for value in normalized.year))
+    ]
+    valid = yearly[0].append(yearly[1:])
+    return normalized.isin(valid)
 
 
 def is_nyse_trading_day(day: pd.Timestamp | str) -> bool:
