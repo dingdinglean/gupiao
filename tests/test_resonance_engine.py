@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import resonance_main
 
 from resonance.cluster_builder import SignalClusterBuilder
 from resonance.config import load_resonance_config
@@ -220,6 +221,83 @@ class ResonanceEngineTests(unittest.TestCase):
         self.assertIn("比特币与加密资产｜周线集体抄底", text)
         self.assertIn("后续接力", text)
         self.assertNotIn("共振", text + html)
+
+    def test_daily_stock_with_passed_trend_appears_in_recommendations(self):
+        config = load_resonance_config()
+        raw = [observation("AMD", "2026-09-21", trend_filter_pass=True)]
+        recommendations = resonance_main._individual_recommendations(raw, config)
+        _, text, html = format_resonance_email([], recommendations, config)
+        self.assertEqual([item.ticker for item in recommendations], ["AMD"])
+        self.assertIn("AMD｜2026-09-21｜蓝>黄", text)
+        self.assertIn("今日个股日线抄底", html)
+
+    def test_daily_stock_with_failed_trend_is_not_recommended(self):
+        config = load_resonance_config()
+        recommendations = resonance_main._individual_recommendations(
+            [observation("COST", "2026-09-21", trend_filter_pass=False)], config,
+        )
+        self.assertEqual(recommendations, [])
+
+    def test_weekly_stock_is_not_in_daily_recommendations(self):
+        config = load_resonance_config()
+        recommendations = resonance_main._individual_recommendations(
+            [observation("AMD", "2026-09-20", "weekly", trend_filter_pass=True)], config,
+        )
+        self.assertEqual(recommendations, [])
+
+    def test_daily_etf_is_not_in_stock_recommendations(self):
+        config = load_resonance_config()
+        recommendations = resonance_main._individual_recommendations(
+            [observation("SOXQ", "2026-09-21", trend_filter_pass=True)], config,
+        )
+        self.assertEqual(recommendations, [])
+
+    def test_anchor_is_not_in_stock_recommendations(self):
+        config = load_resonance_config()
+        recommendations = resonance_main._individual_recommendations(
+            [observation("BTC-USD", "2026-09-21", trend_filter_pass=True)], config,
+        )
+        self.assertEqual(recommendations, [])
+
+    def test_soxq_failed_trend_is_hidden_from_recommendations_but_kept_in_collective_event(self):
+        config = load_resonance_config()
+        raw = [
+            observation("SOXX", "2026-09-17", trend_filter_pass=True),
+            observation("SOXQ", "2026-09-17", trend_filter_pass=False),
+            observation("SMH", "2026-09-17", trend_filter_pass=True),
+        ]
+        event = next(
+            item for item in ResonanceEngine(config).evaluate(raw)
+            if item.theme_id == "semiconductor"
+        )
+        recommendations = resonance_main._individual_recommendations(raw, config)
+        self.assertIn("SOXQ", event.synchronous_tickers)
+        self.assertNotIn("SOXQ", [item.ticker for item in recommendations])
+
+    def test_cost_and_fslr_failed_trend_never_appear_in_email(self):
+        config = load_resonance_config()
+        raw = [
+            observation("COST", "2026-09-21", trend_filter_pass=False),
+            observation("FSLR", "2026-09-21", trend_filter_pass=False),
+        ]
+        recommendations = resonance_main._individual_recommendations(raw, config)
+        _, text, html = format_resonance_email([], recommendations, config)
+        self.assertNotIn("COST", text + html)
+        self.assertNotIn("FSLR", text + html)
+        self.assertIn('今日无符合“日线 DXDX + 蓝>黄”的个股信号。', text)
+
+    def test_diagnostics_csv_keeps_failed_trend_raw_observations(self):
+        config = load_resonance_config()
+        raw = [
+            observation("COST", "2026-09-21", trend_filter_pass=False),
+            observation("FSLR", "2026-09-21", trend_filter_pass=False),
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch.object(resonance_main, "OUTPUT_DIR", Path(directory)):
+            resonance_main.write_outputs([], [], raw, [], "<html></html>", config)
+            diagnostics = (Path(directory) / "resonance_individual_signals.csv").read_text(encoding="utf-8-sig")
+        self.assertIn("COST", diagnostics)
+        self.assertIn("FSLR", diagnostics)
+        self.assertIn("False", diagnostics)
 
     def test_daily_and_weekly_same_low_region_make_multi_timeframe(self):
         events = self.events([

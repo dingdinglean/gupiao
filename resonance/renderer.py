@@ -119,7 +119,7 @@ def _event_html(change: ResonanceChange, config: ResonanceConfig) -> str:
 
 def format_resonance_email(
     changes: list[ResonanceChange],
-    individual_signals: list[SignalObservation],
+    individual_recommendations: list[SignalObservation],
     config: ResonanceConfig,
     *,
     scan_time: datetime | None = None,
@@ -132,22 +132,20 @@ def format_resonance_email(
             text_lines.extend(_event_text(change, config))
     else:
         text_lines.extend(["今日无新增板块/主题集体行为。", ""])
-    text_lines.extend(["【今日个体抄底信号】", ""])
-    if individual_signals:
-        for item in sorted(individual_signals, key=lambda value: (value.timeframe, value.signal_date, value.ticker)):
-            timeframe = "周线" if item.timeframe == "weekly" else "日线"
-            trend = "；趋势附加信息：蓝梯>黄梯" if item.trend_filter_pass else ("；趋势附加信息：未通过蓝黄过滤" if item.trend_filter_pass is False else "")
-            text_lines.append(f"{item.ticker}｜{timeframe} DXDX｜{item.signal_date.isoformat()}{trend}")
+    text_lines.extend(["【今日个股日线抄底】", ""])
+    if individual_recommendations:
+        for item in sorted(individual_recommendations, key=lambda value: (value.signal_date, value.ticker)):
+            text_lines.append(f"{item.ticker}｜{item.signal_date.isoformat()}｜蓝>黄")
     else:
-        text_lines.append("今日无新增个体抄底信号。")
+        text_lines.append('今日无符合“日线 DXDX + 蓝>黄”的个股信号。')
     text_lines.extend(["", "仅供研究参考，不构成投资建议。"])
 
     cards = "".join(_event_html(change, config) for change in changes) if changes else "<section class='empty'>今日无新增板块/主题集体行为。</section>"
     individual_rows = "".join(
-        f"<tr><td><strong>{html.escape(item.ticker)}</strong></td><td>{'周线' if item.timeframe == 'weekly' else '日线'}</td><td>{item.signal_date.isoformat()}</td><td>{'通过蓝黄趋势' if item.trend_filter_pass else ('未通过蓝黄趋势' if item.trend_filter_pass is False else '—')}</td></tr>"
-        for item in sorted(individual_signals, key=lambda value: (value.timeframe, value.signal_date, value.ticker))
-    ) or "<tr><td colspan='4'>今日无新增个体抄底信号。</td></tr>"
+        f"<tr><td><strong>{html.escape(item.ticker)}</strong></td><td>{item.signal_date.isoformat()}</td><td>蓝&gt;黄</td></tr>"
+        for item in sorted(individual_recommendations, key=lambda value: (value.signal_date, value.ticker))
+    ) or '<tr><td colspan="3">今日无符合“日线 DXDX + 蓝&gt;黄”的个股信号。</td></tr>'
     html_body = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{margin:0;background:#f4f6f8;color:#17202a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif}}main{{max-width:720px;margin:auto;padding:18px}}h1{{font-size:24px}}h2{{font-size:20px;margin-top:0}}h3{{font-size:15px;color:#566573;margin-bottom:5px}}.card,.empty{{background:white;border-radius:14px;padding:18px;margin:14px 0;box-shadow:0 2px 10px #00000010}}table{{border-collapse:collapse;width:100%}}td,th{{padding:8px 6px;border-bottom:1px solid #edf0f2;text-align:left;font-size:14px}}.facts{{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}}.facts span,.pill{{background:#eef3f8;border-radius:999px;padding:6px 10px;font-size:13px}}.pill{{background:#fff1d6;color:#8a5500}}.muted{{color:#718096;font-size:13px}}
-</style></head><body><main><h1>今日板块 / 主题集体行为</h1>{cards}<section class="card"><h2>今日个体抄底信号</h2><table><tr><th>标的</th><th>周期</th><th>信号日期</th><th>趋势附加信息</th></tr>{individual_rows}</table></section><p class="muted">扫描时间：{scan_time:%Y-%m-%d %H:%M:%S}<br>仅供研究参考，不构成投资建议。</p></main></body></html>"""
+</style></head><body><main><h1>今日板块 / 主题集体行为</h1>{cards}<section class="card"><h2>今日个股日线抄底</h2><table><tr><th>标的</th><th>信号日期</th><th>趋势</th></tr>{individual_rows}</table></section><p class="muted">扫描时间：{scan_time:%Y-%m-%d %H:%M:%S}<br>仅供研究参考，不构成投资建议。</p></main></body></html>"""
     return subject, "\n".join(text_lines) + "\n", html_body

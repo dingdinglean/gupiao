@@ -113,6 +113,11 @@ python long_main.py --dry-run
 `trend_filter_pass` 附加诊断保存，绝不参与 ticker 资格、cluster、subgroup 或
 集体行为状态判断；原有 Individual Daily v1 的蓝黄过滤保持不变。
 
+邮件中的“今日个股日线抄底”是独立的用户推荐层，只展示同时满足 `role=stock`、
+`timeframe=daily`、原始 DXDX=true、`trend_filter_pass=true` 的观察。ETF、锚定资产、
+Weekly 以及蓝黄未通过项不会进入该区域，但仍完整保存在
+`resonance_individual_signals.csv`，并继续按 raw DXDX 参与集体行为。
+
 - Daily：同一 XNYS 交易日为核心，整个 cluster 的最早和最晚信号最多相差 1 个
   交易日。该规则使用完整跨度而不是链式 freshness，因此 D0、D+1、D+2 不会被
   连成一个 cluster。

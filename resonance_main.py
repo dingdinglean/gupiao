@@ -11,11 +11,12 @@ from pathlib import Path
 from data_fetcher import BatchDailyFetchStats, fetch_daily_batch
 from main import load_config, require_smtp_config
 from notifier import send_email
-from resonance.config import load_resonance_config
+from resonance.config import ResonanceConfig, load_resonance_config
 from resonance.engine import ResonanceEngine
+from resonance.mapper import ThemeMapper
 from resonance.reconstruction import HistoricalReconstructor
 from resonance.renderer import format_resonance_email
-from resonance.models import ResonanceChange
+from resonance.models import ResonanceChange, SignalObservation
 from resonance.signal_provider import TimeframeSignalProvider
 from resonance.state_store import ResonanceStateStore
 
@@ -24,6 +25,33 @@ log = logging.getLogger("resonance-engine")
 OUTPUT_DIR = Path("output")
 STATE_PATH = Path("data/resonance_state.json")
 ENGINE_VERSION = "Collective Behavior v1"
+
+
+def _individual_recommendations(
+    observations: list[SignalObservation],
+    config: ResonanceConfig,
+) -> list[SignalObservation]:
+    """Return user-facing Daily v1 stock recommendations only.
+
+    Raw observations remain untouched for collective-behaviour evaluation and
+    diagnostics.  Role comes from the existing theme mapper; no second ticker
+    universe is maintained here.
+    """
+    eligible = [
+        item for item in observations
+        if item.timeframe == "daily"
+        and item.dxdx is True
+        and item.trend_filter_pass is True
+    ]
+    stock_keys = {
+        (item.ticker, item.observation.timeframe, item.signal_date)
+        for item in ThemeMapper(config).map_observations(eligible)
+        if item.role == "stock"
+    }
+    return [
+        item for item in eligible
+        if (item.ticker, item.timeframe, item.signal_date) in stock_keys
+    ]
 
 
 def _flat_event(event, config) -> dict:
@@ -123,8 +151,11 @@ def run(
         if not dry_run:
             state.save()
     recent = [item for item in observations if item.available_date == cutoff]
+    individual_recommendations = _individual_recommendations(recent, config)
     preview_changes = changes if not reconstruct else [ResonanceChange("NEW", "历史重建", event) for event in events if event.state != "WATCH"]
-    subject, body, html_preview = format_resonance_email(preview_changes, recent, config, scan_time=started)
+    subject, body, html_preview = format_resonance_email(
+        preview_changes, individual_recommendations, config, scan_time=started,
+    )
     sent = False
     if changes and not dry_run and not reconstruct:
         smtp = load_config()
