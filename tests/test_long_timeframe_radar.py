@@ -356,11 +356,73 @@ class LongTimeframeRadarTests(unittest.TestCase):
             self.assertTrue(state.is_new(long_signal(timeframe="monthly", when=datetime(2026, 9, 30, 0, 0, tzinfo=ET))))
 
     def test_single_symbol_failure_does_not_abort_market_scan(self):
-        with patch("long_screener.fetch_daily", side_effect=[ValueError("bad data"), current_rth_daily()]), patch("long_screener._signals_from_daily", return_value=([], False)):
+        with patch(
+            "long_screener.fetch_daily_batch",
+            return_value={"NVDA": current_rth_daily()},
+        ) as batch_fetch, patch("long_screener.fetch_daily") as single_fetch, patch(
+            "long_screener._signals_from_daily", return_value=([], False)
+        ):
             signals, stats = long_screener.run_long_screener(["AMD", "NVDA"], max_workers=1, now=TUESDAY)
+        batch_fetch.assert_called_once()
+        single_fetch.assert_not_called()
         self.assertEqual(signals, [])
         self.assertEqual(stats.fetched_count, 1)
         self.assertEqual(stats.failed_count, 1)
+
+    def test_market_scan_uses_one_daily_batch_and_preserves_weekly_signal(self):
+        daily = daily_history_through("2026-09-08")
+        with patch(
+            "long_screener.fetch_daily_batch",
+            return_value={"META": daily, "NVDA": daily},
+        ) as batch_fetch, patch("long_screener.fetch_daily") as single_fetch, patch(
+            "long_screener.fetch_hourly"
+        ) as hourly_fetch, patch(
+            "long_screener.resample_to_weekly", return_value=weekly_bars(previous_dxdx=True)
+        ), patch(
+            "long_screener.resample_to_monthly", return_value=monthly_bars()
+        ), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, stats = long_screener.run_long_screener(
+                ["META", "NVDA"], max_workers=2, now=TUESDAY,
+            )
+        batch_fetch.assert_called_once()
+        self.assertEqual(batch_fetch.call_args.args[0], ["META", "NVDA"])
+        self.assertEqual(batch_fetch.call_args.kwargs["period"], "max")
+        self.assertEqual(batch_fetch.call_args.kwargs["batch_size"], 50)
+        self.assertEqual(batch_fetch.call_args.kwargs["max_single_retries"], 20)
+        single_fetch.assert_not_called()
+        hourly_fetch.assert_not_called()
+        self.assertEqual([(item.symbol, item.timeframe) for item in signals], [("META", "weekly"), ("NVDA", "weekly")])
+        self.assertEqual(stats.fetched_count, 2)
+        self.assertEqual(stats.failed_count, 0)
+
+    def test_market_scan_preserves_monthly_signal(self):
+        daily = daily_history_through("2026-09-08")
+        with patch("long_screener.fetch_daily_batch", return_value={"INTC": daily}), patch(
+            "long_screener.fetch_daily"
+        ) as single_fetch, patch(
+            "long_screener.fetch_hourly"
+        ) as hourly_fetch, patch(
+            "long_screener.resample_to_weekly", return_value=weekly_bars()
+        ), patch(
+            "long_screener.resample_to_monthly", return_value=monthly_bars(previous_dxdx=True)
+        ), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            signals, stats = long_screener.run_long_screener(["INTC"], max_workers=1, now=TUESDAY)
+        single_fetch.assert_not_called()
+        hourly_fetch.assert_not_called()
+        self.assertEqual([(item.symbol, item.timeframe) for item in signals], [("INTC", "monthly")])
+        self.assertEqual(stats.fetched_count, 1)
+
+    def test_market_scan_hourly_fallback_is_lazy_and_cached_per_symbol(self):
+        stale_daily = daily_history_through("2026-09-03")
+        with patch("long_screener.fetch_daily_batch", return_value={"META": stale_daily}), patch(
+            "long_screener.fetch_hourly", return_value=complete_rth_hourly("2026-09-04")
+        ) as hourly_fetch, patch(
+            "long_screener.resample_to_weekly", return_value=weekly_bars(previous_dxdx=True)
+        ), patch(
+            "long_screener.resample_to_monthly", return_value=monthly_bars()
+        ), patch("long_screener.compute_macd_divergence", side_effect=lambda frame: frame):
+            long_screener.run_long_screener(["META"], max_workers=1, now=TUESDAY)
+        hourly_fetch.assert_called_once_with("META", period="730d")
 
     def test_no_signal_skips_smtp_and_writes_artifacts(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(long_main, "OUTPUT_DIR", Path(directory)), patch("long_main.run_long_screener", return_value=([], LongScanStats(pool_count=3, fetched_count=3))), patch("long_main.send_email") as sent:

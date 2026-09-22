@@ -40,6 +40,8 @@ def load_config() -> dict:
         "smtp_password": os.getenv("SMTP_PASSWORD"),
         "to_addrs": [value.strip() for value in os.getenv("EMAIL_TO", "").replace(";", ",").split(",") if value.strip()],
         "max_workers": int(os.getenv("MAX_WORKERS", "6")),
+        "daily_batch_size": int(os.getenv("DAILY_BATCH_SIZE", "50")),
+        "max_single_retries": int(os.getenv("LONG_MAX_SINGLE_RETRIES", "20")),
     }
 
 
@@ -84,6 +86,13 @@ def write_reports(
         f"数据失败数量：{stats.failed_count}",
         f"历史不足数量：{stats.insufficient_count}",
         f"周期完整性拒绝数量：{stats.freshness_rejected_count}",
+        f"批量下载批次数量：{stats.batch_count}",
+        f"主批量成功数量：{stats.batch_success_count}",
+        f"小批量重试次数：{stats.mini_batch_retry_count}",
+        f"单股票兜底次数：{stats.single_retry_count}",
+        f"最终失败数量：{stats.final_failed_count}",
+        f"批量下载耗时（秒）：{stats.batch_download_seconds:.3f}",
+        f"总运行耗时（秒）：{stats.total_runtime_seconds:.3f}",
         f"周线 DXDX 数量：{weekly_count}",
         f"月线 DXDX 数量：{monthly_count}",
         f"邮件是否发送：{'是' if email_sent else '否'}",
@@ -95,7 +104,13 @@ def write_reports(
 def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool = False) -> tuple[list[LongSignal], LongScanStats, bool]:
     started = datetime.now()
     diagnostics: list[LongDiagnostic] = []
-    signals, stats = run_long_screener(symbols, max_workers=cfg["max_workers"], diagnostics=diagnostics)
+    signals, stats = run_long_screener(
+        symbols,
+        max_workers=cfg["max_workers"],
+        diagnostics=diagnostics,
+        batch_size=cfg.get("daily_batch_size", 50),
+        max_single_retries=cfg.get("max_single_retries", 20),
+    )
     new_signals = state.filter_new(signals)
     if dry_run:
         log.info("Dry run: %s new weekly/monthly DXDX signal(s); email and state update skipped.", len(new_signals))

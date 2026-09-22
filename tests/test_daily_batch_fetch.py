@@ -111,6 +111,33 @@ class DailyBatchFetchTests(unittest.TestCase):
         self.assertEqual(result, {})
         self.assertEqual(metrics.final_failed_count, 1)
 
+    def test_single_fallback_cap_limits_requests_and_counts_untried_symbols(self):
+        symbols = ["AMD", "MSFT", "NVDA", "META", "INTC"]
+        metrics = BatchDailyFetchStats()
+        with self.assertLogs("data_fetcher", level="WARNING") as logs, patch(
+            "yfinance.download", return_value=pd.DataFrame()
+        ), patch("data_fetcher.fetch_daily", return_value=pd.DataFrame()) as fallback:
+            result = fetch_daily_batch(
+                symbols,
+                stats=metrics,
+                max_single_retries=2,
+            )
+        self.assertEqual(result, {})
+        self.assertEqual(fallback.call_count, 2)
+        self.assertEqual(metrics.single_retry_count, 2)
+        self.assertEqual(metrics.final_failed_count, 5)
+        self.assertTrue(any("single retry cap reached" in message for message in logs.output))
+
+    def test_none_single_fallback_cap_preserves_existing_behavior(self):
+        symbols = ["AMD", "MSFT", "NVDA"]
+        metrics = BatchDailyFetchStats()
+        with patch("yfinance.download", return_value=pd.DataFrame()), patch(
+            "data_fetcher.fetch_daily", return_value=pd.DataFrame()
+        ) as fallback:
+            fetch_daily_batch(symbols, stats=metrics, max_single_retries=None)
+        self.assertEqual(fallback.call_count, len(symbols))
+        self.assertEqual(metrics.final_failed_count, len(symbols))
+
     def test_batch_ohlcv_and_indicators_match_single_symbol_fixture(self):
         expected = data_fetcher._daily_regular_session_only(daily_frame())
         downloaded = pd.DataFrame({

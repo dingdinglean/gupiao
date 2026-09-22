@@ -7,6 +7,7 @@ same unmodified MACD/DXDX implementation from ``indicators.py``.
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -15,8 +16,10 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from data_fetcher import (
+    BatchDailyFetchStats,
     _daily_regular_session_only,
     fetch_daily,
+    fetch_daily_batch,
     fetch_hourly,
     resample_to_monthly,
     resample_to_weekly,
@@ -85,6 +88,26 @@ class LongScanStats:
     failed_count: int = 0
     insufficient_count: int = 0
     freshness_rejected_count: int = 0
+    universe_count: int = 0
+    batch_size: int = 0
+    batch_count: int = 0
+    batch_success_count: int = 0
+    mini_batch_retry_count: int = 0
+    mini_batch_retry_symbols: int = 0
+    mini_batch_success_count: int = 0
+    single_retry_count: int = 0
+    single_retry_success_count: int = 0
+    fallback_retry_count: int = 0
+    fallback_success_count: int = 0
+    final_failed_count: int = 0
+    cache_warmup_seconds: float = 0.0
+    batch_download_seconds: float = 0.0
+    mini_batch_retry_seconds: float = 0.0
+    single_retry_seconds: float = 0.0
+    fallback_retry_seconds: float = 0.0
+    normalization_seconds: float = 0.0
+    indicator_compute_seconds: float = 0.0
+    total_runtime_seconds: float = 0.0
 
 
 def _as_new_york_time(now: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
@@ -322,14 +345,41 @@ def check_symbol(symbol: str, *, now: datetime | pd.Timestamp | None = None) -> 
 def run_long_screener(
     symbols: list[str], *, max_workers: int = 6, now: datetime | pd.Timestamp | None = None,
     diagnostics: list[LongDiagnostic] | None = None,
+    batch_size: int = 50,
+    max_single_retries: int | None = 20,
 ) -> tuple[list[LongSignal], LongScanStats]:
-    """Scan the existing S&P 500 + Nasdaq-100 universe without shared failure."""
+    """Batch-download daily history, then scan each symbol locally.
+
+    The outer worker pool performs only resampling and indicator work.  Yahoo
+    network concurrency is owned by ``fetch_daily_batch`` so a large universe
+    never creates one ``period=max`` request per worker.
+    """
+    started = time.perf_counter()
     allowed = [symbol for symbol in symbols if is_us_listed_stock(symbol)]
-    stats = LongScanStats(pool_count=len(allowed))
+    stats = LongScanStats(
+        pool_count=len(allowed), universe_count=len(allowed), batch_size=batch_size,
+    )
     signals: list[LongSignal] = []
+    metrics = BatchDailyFetchStats()
+    daily_map = fetch_daily_batch(
+        allowed,
+        period="max",
+        batch_size=batch_size,
+        stats=metrics,
+        max_single_retries=max_single_retries,
+    )
+    for field in (
+        "batch_size", "batch_count", "batch_success_count", "mini_batch_retry_count",
+        "mini_batch_retry_symbols", "mini_batch_success_count", "single_retry_count",
+        "single_retry_success_count", "fallback_retry_count", "fallback_success_count",
+        "final_failed_count", "cache_warmup_seconds", "batch_download_seconds",
+        "mini_batch_retry_seconds", "single_retry_seconds", "fallback_retry_seconds",
+        "normalization_seconds",
+    ):
+        setattr(stats, field, getattr(metrics, field))
 
     def scan(symbol: str) -> tuple[list[LongSignal], bool, list[LongDiagnostic]]:
-        daily = fetch_daily(symbol, period="max")
+        daily = daily_map[symbol.upper()]
         symbol_diagnostics: list[LongDiagnostic] = []
         hourly: pd.DataFrame | None = None
 
@@ -348,8 +398,18 @@ def run_long_screener(
         )
         return symbol_signals, insufficient, symbol_diagnostics
 
+    available = []
+    for symbol in allowed:
+        daily = daily_map.get(symbol.upper())
+        if daily is None or daily.empty:
+            stats.failed_count += 1
+            log.warning("%s skipped: no daily history after bounded batch retries", symbol)
+        else:
+            available.append(symbol)
+
+    compute_started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(scan, symbol): symbol for symbol in allowed}
+        futures = {executor.submit(scan, symbol): symbol for symbol in available}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
@@ -363,5 +423,17 @@ def run_long_screener(
             except Exception as exc:
                 stats.failed_count += 1
                 log.warning("%s skipped: %s", symbol, exc)
+    stats.indicator_compute_seconds = time.perf_counter() - compute_started
+    stats.total_runtime_seconds = time.perf_counter() - started
+    log.info(
+        "long scan fetch universe_count=%s batch_size=%s batch_count=%s "
+        "batch_success_count=%s mini_batch_retry_count=%s single_retry_count=%s "
+        "final_failed_count=%s fetched_count=%s failed_count=%s "
+        "batch_download_seconds=%.3f indicator_compute_seconds=%.3f total_runtime_seconds=%.3f",
+        stats.universe_count, stats.batch_size, stats.batch_count,
+        stats.batch_success_count, stats.mini_batch_retry_count, stats.single_retry_count,
+        stats.final_failed_count, stats.fetched_count, stats.failed_count,
+        stats.batch_download_seconds, stats.indicator_compute_seconds, stats.total_runtime_seconds,
+    )
     priority = {"monthly": 0, "weekly": 1}
     return sorted(signals, key=lambda item: (priority[item.timeframe], item.symbol)), stats

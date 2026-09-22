@@ -275,10 +275,19 @@ def fetch_daily_batch(
     batch_size: int = 50,
     *,
     stats: BatchDailyFetchStats | None = None,
+    max_single_retries: int | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Fetch official 1D history via bounded batches and layered retries."""
+    """Fetch official 1D history via bounded batches and layered retries.
+
+    ``max_single_retries=None`` preserves the historical behaviour of trying
+    every symbol left unresolved by the two batch layers.  Large-universe
+    callers can set a finite cap so a broad Yahoo outage cannot degrade into
+    hundreds of slow serial ``Ticker.history`` calls.
+    """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+    if max_single_retries is not None and max_single_retries < 0:
+        raise ValueError("max_single_retries must be non-negative or None")
 
     ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols if symbol))
     metrics = stats if stats is not None else BatchDailyFetchStats()
@@ -332,7 +341,17 @@ def fetch_daily_batch(
         still_missing.extend(missing)
         log.info("daily retry batch %s/%s done elapsed=%.3f success=%s missing=%s", retry_number, mini_count, elapsed, len(accepted), len(missing))
 
-    for symbol in still_missing:
+    retry_symbols = still_missing if max_single_retries is None else still_missing[:max_single_retries]
+    skipped_symbols = still_missing[len(retry_symbols):]
+    if skipped_symbols:
+        metrics.final_failed_count += len(skipped_symbols)
+        log.warning(
+            "daily single retry cap reached cap=%s unresolved_without_single_retry=%s",
+            max_single_retries,
+            len(skipped_symbols),
+        )
+
+    for symbol in retry_symbols:
         metrics.single_retry_count += 1
         metrics.fallback_retry_count += 1  # Backward-compatible report field.
         log.info("daily single retry %s start", symbol)

@@ -45,6 +45,8 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           MAX_WORKERS: "6"
+          DAILY_BATCH_SIZE: "50"
+          LONG_MAX_SINGLE_RETRIES: "20"
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             python long_main.py --dry-run
