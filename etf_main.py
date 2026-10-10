@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 from etf_notifier import format_etf_signals_email, sort_etf_signals
+from integrity import DataTier, attach_integrity, classify_integrity, failure_notification, finish_integrity, prepend_banner, warning_banner
 from etf_screener import run_etf_confirmation_screener
 from etf_universe import ETF_NAMES, ETF_UNIVERSE, etf_name
 from main import confirmation_session_times, load_config, require_smtp_config
@@ -97,6 +98,11 @@ def write_etf_reports(
         f"total runtime seconds：{stats.total_runtime_seconds:.3f}",
         f"检测时间：{detected_at.isoformat()}",
     ]
+    integrity = getattr(stats, "integrity", None)
+    if integrity is not None:
+        banner = warning_banner(integrity)
+        if banner:
+            lines.append(banner.rstrip("\n"))
     (OUTPUT_DIR / "etf_daily_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -115,15 +121,32 @@ def run_etf_confirmation(
         sessions,
         require_strict_separation=cfg["strict_separation"],
         batch_size=cfg.get("daily_batch_size", 50),
+        max_single_retries=cfg.get("max_single_retries", 20),
     )
+    integrity = attach_integrity(stats, classify_integrity(
+        pool_count=stats.pool_count,
+        fetched_count=stats.fetched_count,
+        missing_symbols=stats.failed_symbols,
+    ))
     state_restored = state is not None and not dry_run
     signals = all_signals if dry_run else state.filter_new(all_signals) if state is not None else []
     email_sent = False
     state_saved = False
     marked_sent = 0
-    if not dry_run and signals:
+    if not dry_run and integrity.tier == DataTier.CRITICAL:
+        require_smtp_config(cfg)
+        subject, body = failure_notification("美股ETF日线抄底雷达", integrity)
+        send_email(
+            cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"],
+            cfg["smtp_password"], cfg["to_addrs"], subject, body,
+        )
+        if state is not None:
+            state.save()
+            state_saved = True
+    elif not dry_run and signals:
         require_smtp_config(cfg)
         subject, body = format_etf_signals_email(signals, scan_time=started)
+        body = prepend_banner(body, integrity)
         send_email(
             cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"],
             cfg["smtp_password"], cfg["to_addrs"], subject, body,
@@ -192,18 +215,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     if args.replay:
-        replay_etf_daily(*args.replay)
-        return
+        return replay_etf_daily(*args.replay)
     cfg = load_config()
     state = None
     if not args.dry_run:
         ETF_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         state = AlertState(ETF_STATE_PATH)
-    run_etf_confirmation(cfg, state, dry_run=args.dry_run)
+    _signals, stats, _sent = run_etf_confirmation(cfg, state, dry_run=args.dry_run)
+    integrity = getattr(stats, "integrity", None) or classify_integrity(pool_count=stats.pool_count, fetched_count=stats.fetched_count, missing_symbols=list(getattr(stats, "failed_symbols", []) or []))
+    return finish_integrity(log, integrity)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

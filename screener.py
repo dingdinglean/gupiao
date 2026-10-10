@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -147,6 +147,7 @@ class ScanStats:
     indicator_compute_seconds: float = 0.0
     diagnostics_write_seconds: float = 0.0
     total_runtime_seconds: float = 0.0
+    failed_symbols: list[str] = field(default_factory=list)
 
 
 def _as_new_york_time(now: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
@@ -270,6 +271,7 @@ def run_confirmation_screener(
     batch_size: int = 50,
     symbol_validator: Callable[[str], bool] = is_us_listed_stock,
     source_radar: str = "daily",
+    max_single_retries: int | None = 20,
 ) -> tuple[list[Signal], ScanStats, list[DailyDiagnostic]]:
     """Batch-download official daily history, then evaluate five sessions locally.
 
@@ -282,7 +284,9 @@ def run_confirmation_screener(
     allowed = [s for s in symbols if symbol_validator(s)]
     stats = ScanStats(pool_count=len(allowed), universe_count=len(allowed), batch_size=batch_size)
     metrics = BatchDailyFetchStats()
-    daily_map = fetch_daily_batch(allowed, period="max", batch_size=batch_size, stats=metrics)
+    daily_map = fetch_daily_batch(
+        allowed, period="max", batch_size=batch_size, stats=metrics, max_single_retries=max_single_retries,
+    )
     for field in (
         "batch_size", "batch_count", "batch_success_count", "mini_batch_retry_count",
         "mini_batch_retry_symbols", "mini_batch_success_count", "single_retry_count",
@@ -300,6 +304,8 @@ def run_confirmation_screener(
         raw_daily = daily_map.get(symbol.upper())
         if raw_daily is None or raw_daily.empty:
             stats.failed_count += 1
+            stats.failed_symbols.append(symbol)
+            log.warning("%s skipped: no daily history after bounded batch retries", symbol)
             continue
         try:
             found, rows = check_symbol_confirmation(
@@ -313,6 +319,7 @@ def run_confirmation_screener(
             stats.fetched_count += 1
         except Exception as exc:
             stats.failed_count += 1
+            stats.failed_symbols.append(symbol)
             log.warning("%s skipped: %s", symbol, exc)
     stats.indicator_compute_seconds = time.perf_counter() - compute_started
     stats.total_runtime_seconds = time.perf_counter() - started
@@ -551,6 +558,7 @@ def run_screener(
                     signals.append(result)
             except Exception as exc:
                 stats.failed_count += 1
+                stats.failed_symbols.append(symbol)
                 log.warning("%s skipped: %s", symbol, exc)
     priority = {"S": 0, "A": 1, "B": 2}
     return sorted(signals, key=lambda item: (priority[item.signal_level], item.symbol)), stats

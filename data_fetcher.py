@@ -74,8 +74,8 @@ def configure_yfinance_runtime() -> str:
             log.warning("yfinance runtime has no set_tz_cache_location capability")
         try:
             yf.config.network.retries = 2
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("yfinance retry configuration failed; continuing with default retries: %s", exc)
         _YF_RUNTIME_READY = True
         log.info("yfinance runtime cache_dir=%s", _YF_CACHE_DIR)
         return _YF_CACHE_DIR
@@ -388,6 +388,7 @@ def fetch_hourly(symbol: str, period: str = "730d") -> pd.DataFrame:
         interval="1h",
         auto_adjust=True,
         prepost=False,
+        timeout=YF_SINGLE_TIMEOUT_SECONDS,
     )
     return _regular_session_only(_normalize(df))
 

@@ -89,8 +89,8 @@ class ETFDailyRadarTests(unittest.TestCase):
     def test_etf_scanner_uses_one_max_history_batch_of_17(self):
         seen = {}
 
-        def fake_batch(symbols, period, batch_size, *, stats):
-            seen.update(symbols=list(symbols), period=period, batch_size=batch_size)
+        def fake_batch(symbols, period, batch_size, *, stats, max_single_retries=None):
+            seen.update(symbols=list(symbols), period=period, batch_size=batch_size, max_single_retries=max_single_retries)
             stats.universe_count = len(symbols)
             stats.batch_size = batch_size
             stats.batch_count = 1
@@ -99,7 +99,7 @@ class ETFDailyRadarTests(unittest.TestCase):
 
         with patch("screener.fetch_daily_batch", side_effect=fake_batch), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
             _, stats, rows = etf_screener.run_etf_confirmation_screener([TARGET])
-        self.assertEqual(seen, {"symbols": list(ETF_UNIVERSE), "period": "max", "batch_size": 50})
+        self.assertEqual(seen, {"symbols": list(ETF_UNIVERSE), "period": "max", "batch_size": 50, "max_single_retries": 20})
         self.assertEqual(stats.batch_count, 1)
         self.assertEqual(len(rows), 17)
 
@@ -178,8 +178,8 @@ class ETFDailyRadarTests(unittest.TestCase):
 
     def test_cli_dry_run_does_not_construct_formal_state(self):
         args = MagicMock(dry_run=True, replay=None)
-        with patch("etf_main.parse_args", return_value=args), patch("etf_main.load_config", return_value={}), patch("etf_main.AlertState") as state_type, patch("etf_main.run_etf_confirmation") as run:
-            etf_main.main()
+        with patch("etf_main.parse_args", return_value=args), patch("etf_main.load_config", return_value={}), patch("etf_main.AlertState") as state_type, patch("etf_main.run_etf_confirmation", return_value=([], ScanStats(pool_count=17, fetched_count=17), False)) as run:
+            self.assertEqual(etf_main.main(), 0)
         state_type.assert_not_called()
         run.assert_called_once_with({}, None, dry_run=True)
 
@@ -231,7 +231,9 @@ class ETFDailyRadarTests(unittest.TestCase):
         workflow = Path(".github/workflows/etf_daily_screen.yml").read_text(encoding="utf-8")
         stock_workflow = Path(".github/workflows/screen.yml").read_text(encoding="utf-8")
         self.assertIn("name: US ETF Daily DXDX Radar", workflow)
-        self.assertIn('cron: "0 8 * * 2-6"', workflow)
+        self.assertIn('cron: "10 8 * * 2-6"', workflow)
+        self.assertIn("yahoo-market-data", workflow)
+        self.assertIn('cron: "0 8 * * 2-6"', stock_workflow)
         self.assertIn("python etf_main.py", workflow)
         self.assertIn("data/etf_daily_alert_state.json", workflow)
         self.assertIn("etf_daily_signals.csv", workflow)

@@ -6,3 +6,5 @@ alert_state.json
 data/etf_daily_alert_state.json
 data/resonance_state.json
 output/
+data/constituents/*.bak
+data/constituents/*.csv.tmp

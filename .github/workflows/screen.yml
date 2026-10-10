@@ -25,6 +25,14 @@ on:
 permissions:
   contents: read
 
+# Separate from the ETF, weekly/monthly, and resonance jobs. Sharing this group
+# keeps their Yahoo requests from running at the same time. queue:max holds every
+# pending run; cancel-in-progress stays false so a later schedule cannot drop one.
+concurrency:
+  group: yahoo-market-data
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   scan:
     runs-on: ubuntu-latest
