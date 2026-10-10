@@ -157,10 +157,11 @@ class DailyBatchFetchTests(unittest.TestCase):
         sessions = [pd.Timestamp(raw.index[-1])]
         metrics_seen: list[BatchDailyFetchStats] = []
 
-        def fake_batch(symbols, period, batch_size, *, stats):
+        def fake_batch(symbols, period, batch_size, *, stats, max_single_retries=None):
             metrics_seen.append(stats)
             stats.universe_count = len(symbols); stats.batch_size = batch_size; stats.batch_count = 1
             stats.batch_success_count = len(symbols)
+            self.assertEqual(max_single_retries, 20)
             return {symbol.upper(): raw for symbol in symbols}
 
         with patch("screener.fetch_daily_batch", side_effect=fake_batch) as batch_fetch, patch("screener.fetch_daily") as single_fetch, patch("screener.fetch_hourly") as hourly_fetch:

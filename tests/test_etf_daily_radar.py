@@ -89,8 +89,8 @@ class ETFDailyRadarTests(unittest.TestCase):
     def test_etf_scanner_uses_one_max_history_batch_of_17(self):
         seen = {}
 
-        def fake_batch(symbols, period, batch_size, *, stats):
-            seen.update(symbols=list(symbols), period=period, batch_size=batch_size)
+        def fake_batch(symbols, period, batch_size, *, stats, max_single_retries=None):
+            seen.update(symbols=list(symbols), period=period, batch_size=batch_size, max_single_retries=max_single_retries)
             stats.universe_count = len(symbols)
             stats.batch_size = batch_size
             stats.batch_count = 1
@@ -99,7 +99,7 @@ class ETFDailyRadarTests(unittest.TestCase):
 
         with patch("screener.fetch_daily_batch", side_effect=fake_batch), patch("screener.add_all_indicators", side_effect=lambda frame: frame):
             _, stats, rows = etf_screener.run_etf_confirmation_screener([TARGET])
-        self.assertEqual(seen, {"symbols": list(ETF_UNIVERSE), "period": "max", "batch_size": 50})
+        self.assertEqual(seen, {"symbols": list(ETF_UNIVERSE), "period": "max", "batch_size": 50, "max_single_retries": 20})
         self.assertEqual(stats.batch_count, 1)
         self.assertEqual(len(rows), 17)
 

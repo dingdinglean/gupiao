@@ -12,6 +12,7 @@ def run_etf_confirmation_screener(
     *,
     require_strict_separation: bool = False,
     batch_size: int = 50,
+    max_single_retries: int | None = 20,
 ) -> tuple[list[Signal], ScanStats, list[DailyDiagnostic]]:
     """Scan the fixed ETF whitelist with the shared batch fetch and indicators."""
     return run_confirmation_screener(
@@ -22,4 +23,5 @@ def run_etf_confirmation_screener(
         batch_size=batch_size,
         symbol_validator=is_etf_symbol,
         source_radar="etf_daily",
+        max_single_retries=max_single_retries,
     )

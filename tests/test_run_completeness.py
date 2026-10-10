@@ -1,7 +1,6 @@
 """Incomplete fetches stay visible without changing email rules."""
 from __future__ import annotations
 
-import logging
 import tempfile
 import unittest
 from datetime import datetime
@@ -54,25 +53,26 @@ class RunCompletenessTests(unittest.TestCase):
         self.assertIn("MSFT skipped: no daily history", "\n".join(logs.output))
         self.assertIn("AMD skipped: no daily history", "\n".join(logs.output))
 
-    def test_incomplete_stock_run_still_emails_then_returns_nonzero(self):
+    def test_partial_stock_run_keeps_signal_email_and_exits_zero(self):
         universe._LAST_LOADS = []
-        stats = ScanStats(pool_count=2, fetched_count=1, failed_count=1, final_failed_count=1)
+        stats = ScanStats(pool_count=2, fetched_count=1, failed_count=1, final_failed_count=1, failed_symbols=["MSFT"])
         args = type("Args", (), {"test_email": False, "replay_daily": None, "confirm_daily": True, "dry_run": False})()
-        with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)), patch("main.parse_args", return_value=args), patch("main.load_config", return_value={"strict_separation": False, "max_workers": 1, "daily_batch_size": 50, "smtp_host": "smtp.example", "smtp_port": 587, "smtp_user": "sender", "smtp_password": "secret", "to_addrs": ["to@example.test"]}), patch("main.get_universe", return_value=["AMD", "MSFT"]), patch("main.run_confirmation_screener", return_value=([_signal()], stats, [])), patch("main.send_email") as email, patch("main.AlertState") as state_type:
+        with tempfile.TemporaryDirectory() as directory, patch.object(main, "OUTPUT_DIR", Path(directory)), patch("main.parse_args", return_value=args), patch("main.load_config", return_value={"strict_separation": False, "max_workers": 1, "daily_batch_size": 50, "max_single_retries": 20, "smtp_host": "smtp.example", "smtp_port": 587, "smtp_user": "sender", "smtp_password": "secret", "to_addrs": ["to@example.test"]}), patch("main.get_universe", return_value=["AMD", "MSFT"]), patch("main.run_confirmation_screener", return_value=([_signal()], stats, [])), patch("main.send_email") as email, patch("main.AlertState") as state_type, patch("notifier.smtplib.SMTP", side_effect=AssertionError("real smtp")), patch("notifier.smtplib.SMTP_SSL", side_effect=AssertionError("real smtp")):
             state = state_type.return_value
             state.filter_new.side_effect = lambda signals: signals
             code = main.main()
             report = (Path(directory) / "dxdx_report.txt").read_text(encoding="utf-8")
+        subject, body = email.call_args.args[5], email.call_args.args[6]
         email.assert_called_once()
         state.mark_sent.assert_called_once()
-        self.assertIn("结果完整性警告：数据失败数量=1；最终失败数量=1", report)
+        self.assertTrue(subject.startswith("【美股日线抄底雷达】"))
+        self.assertIn("【数据完整性：部分缺失】", body)
+        self.assertIn("缺失数量：1", body)
+        self.assertIn("MSFT", body)
+        self.assertIn("日线抄底", body)
+        self.assertIn("【数据完整性：部分缺失】", report)
         self.assertIn("邮件是否发送：是", report)
-        self.assertEqual(code, 1)
-
-    def test_complete_etf_run_returns_zero(self):
-        stats = ScanStats(pool_count=17, fetched_count=17, failed_count=0, final_failed_count=0)
-        self.assertEqual(data_fetcher.log_incomplete_results(logging.getLogger("etf-test"), data_fetcher.incomplete_data_reasons(stats)), 0)
-        self.assertIsNone(data_fetcher.completeness_warning(stats))
+        self.assertEqual(code, 0)
 
     def test_workflows_share_yahoo_slot_without_dropping_pending_runs(self):
         root = Path(".github/workflows")
@@ -93,6 +93,29 @@ class RunCompletenessTests(unittest.TestCase):
         self.assertIn("python etf_main.py", etf)
         self.assertIn("python main.py", stock)
         self.assertNotIn("python etf_main.py", stock)
+        state_paths = []
+        for name in schedules:
+            text = (root / name).read_text(encoding="utf-8")
+            self.assertIn("contents: read", text, name)
+            self.assertNotIn("needs:", text, name)
+            self.assertNotIn("git commit", text, name)
+            self.assertNotIn("git push", text, name)
+            timeouts = [int(item) for item in __import__("re").findall(r"timeout-minutes:\s*(\d+)", text)]
+            self.assertTrue(timeouts and all(item > 0 for item in timeouts), name)
+            for line in text.splitlines():
+                stripped = line.strip()
+                if not stripped.startswith("path:"):
+                    continue
+                value = stripped.split(":", 1)[1].strip()
+                if "alert_state" in value or "resonance_state" in value:
+                    state_paths.append(value)
+        self.assertEqual(set(state_paths), {
+            "alert_state.json",
+            "data/etf_daily_alert_state.json",
+            "long_alert_state.json",
+            "data/resonance_state.json",
+        })
+        self.assertIn('python-version: "3.11"', (root / "ci.yml").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -158,6 +158,7 @@ def _read_cache(name: str) -> tuple[list[str], datetime | None] | None:
 
 
 def _write_cache(name: str, symbols: list[str], fetched_at: datetime) -> None:
+    """Replace a constituent file atomically, restoring the previous file if the new one cannot be read back."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     frame = pd.DataFrame({
         "ticker": list(symbols),
@@ -166,8 +167,30 @@ def _write_cache(name: str, symbols: list[str], fetched_at: datetime) -> None:
     })
     target = CACHE_DIR / f"{name}.csv"
     temporary = target.with_suffix(".csv.tmp")
-    frame.to_csv(temporary, index=False)
-    temporary.replace(target)
+    backup = target.with_suffix(".csv.bak")
+    if backup.exists():
+        backup.unlink()
+    had_original = target.exists()
+    if had_original:
+        backup.write_bytes(target.read_bytes())
+    try:
+        frame.to_csv(temporary, index=False)
+        temporary.replace(target)
+        reread = _read_cache(name)
+        if reread is None or list(reread[0]) != list(symbols):
+            raise RuntimeError(f"{name} constituent cache failed read-back validation")
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        if had_original and backup.exists():
+            backup.replace(target)
+            log.error("%s constituent cache restored from backup after failed write", name)
+        elif not had_original and target.exists():
+            target.unlink()
+        raise
+    else:
+        if backup.exists():
+            backup.unlink()
 
 
 def _remember(loads: list[ConstituentLoad] | None, load: ConstituentLoad) -> None:
@@ -194,7 +217,10 @@ def _load_or_fetch(name: str, fetcher, loads: list[ConstituentLoad] | None = Non
         fetch_error = exc
         log.warning("%s universe source unavailable: %s", name, exc)
     if fresh is not None and _is_plausible(name, fresh):
-        _write_cache(name, fresh, moment)
+        try:
+            _write_cache(name, fresh, moment)
+        except Exception as exc:
+            log.warning("%s constituent cache write failed; previous file kept: %s", name, exc)
         log.info("%s constituents refreshed count=%s", name, len(fresh))
         _remember(loads, ConstituentLoad(name, fresh, "refresh"))
         return fresh

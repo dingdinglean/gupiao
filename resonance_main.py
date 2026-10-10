@@ -8,7 +8,8 @@ import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from data_fetcher import BatchDailyFetchStats, completeness_warning, fetch_daily_batch, incomplete_data_reasons, log_incomplete_results
+from data_fetcher import BatchDailyFetchStats, fetch_daily_batch
+from integrity import DataTier, classify_integrity, failure_notification, finish_integrity, prepend_banner, prepend_html_banner, warning_banner
 from main import load_config, require_smtp_config
 from notifier import send_email
 from resonance.config import ResonanceConfig, load_resonance_config
@@ -25,7 +26,7 @@ log = logging.getLogger("resonance-engine")
 OUTPUT_DIR = Path("output")
 STATE_PATH = Path("data/resonance_state.json")
 ENGINE_VERSION = "Collective Behavior v1"
-_LAST_INCOMPLETE_REASONS: list[str] = []
+_LAST_INTEGRITY = None
 
 
 def _individual_recommendations(
@@ -135,7 +136,10 @@ def run(
     config = load_resonance_config(theme_ids=theme_ids)
     stats = BatchDailyFetchStats()
     batch_size = int(os.getenv("RESONANCE_BATCH_SIZE", "50"))
-    daily_map = fetch_daily_batch(config.tickers, period="max", batch_size=batch_size, stats=stats)
+    max_single_retries = int(os.getenv("RESONANCE_MAX_SINGLE_RETRIES", "20"))
+    daily_map = fetch_daily_batch(
+        config.tickers, period="max", batch_size=batch_size, stats=stats, max_single_retries=max_single_retries,
+    )
     provider = TimeframeSignalProvider(config)
     observation_start = reconstruct[0] - timedelta(days=14) if reconstruct else cutoff - timedelta(days=120)
     observations = provider.build(daily_map, as_of=cutoff, start=observation_start)
@@ -157,10 +161,30 @@ def run(
     subject, body, html_preview = format_resonance_email(
         preview_changes, individual_recommendations, config, scan_time=started,
     )
+    fetched_keys = {str(symbol).upper() for symbol in daily_map}
+    missing_symbols = [ticker for ticker in config.tickers if str(ticker).upper() not in fetched_keys]
+    integrity = classify_integrity(
+        pool_count=len(config.tickers),
+        fetched_count=len(daily_map),
+        missing_symbols=missing_symbols,
+    )
+    global _LAST_INTEGRITY
+    _LAST_INTEGRITY = integrity
     sent = False
-    if changes and not dry_run and not reconstruct:
+    if not dry_run and not reconstruct and integrity.tier == DataTier.CRITICAL:
         smtp = load_config()
         require_smtp_config(smtp)
+        failure_subject, failure_body = failure_notification("全市场板块 / 主题集体行为引擎", integrity)
+        send_email(
+            smtp["smtp_host"], smtp["smtp_port"], smtp["smtp_user"], smtp["smtp_password"],
+            smtp["to_addrs"], failure_subject, failure_body,
+        )
+    elif changes and not dry_run and not reconstruct:
+        smtp = load_config()
+        require_smtp_config(smtp)
+        if integrity.tier == DataTier.PARTIAL:
+            body = prepend_banner(body, integrity)
+            html_preview = prepend_html_banner(html_preview, integrity)
         send_email(
             smtp["smtp_host"], smtp["smtp_port"], smtp["smtp_user"], smtp["smtp_password"],
             smtp["to_addrs"], subject, body, html_body=html_preview,
@@ -183,14 +207,9 @@ def run(
         f"历史逐日重建：{'是' if reconstruct else '否'}",
         f"截至日期：{cutoff.isoformat()}",
     ]
-    missing = len(config.tickers) - len(daily_map)
-    reasons = incomplete_data_reasons(stats)
-    if missing and not any(reason.startswith("失败取数=") for reason in reasons):
-        reasons.append(f"失败取数={missing}")
-    warning = completeness_warning(extra=reasons)
-    if warning:
-        report.append(warning)
-    _LAST_INCOMPLETE_REASONS[:] = reasons
+    banner = warning_banner(integrity)
+    if banner:
+        report.append(banner.rstrip("\n"))
     write_outputs(events, changes, observations, report, html_preview, config)
     return events, changes
 
@@ -215,7 +234,9 @@ def main() -> int:
         reconstruct=reconstruction,
         as_of=date.fromisoformat(args.as_of) if args.as_of else (reconstruction[1] if reconstruction else None),
     )
-    return log_incomplete_results(log, _LAST_INCOMPLETE_REASONS)
+    if _LAST_INTEGRITY is None:
+        return 1
+    return finish_integrity(log, _LAST_INTEGRITY)
 
 
 if __name__ == "__main__":

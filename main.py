@@ -18,8 +18,9 @@ except ImportError:  # Test/minimal environments can still use process env.
         return False
 
 from notifier import format_signals_email, send_email
-from data_fetcher import completeness_warning, configure_yfinance_runtime, incomplete_data_reasons, log_incomplete_results
+from data_fetcher import configure_yfinance_runtime
 from indicators import compute_macd_divergence
+from integrity import DataTier, attach_integrity, classify_integrity, failure_notification, finish_integrity, prepend_banner, warning_banner
 from screener import DailyDiagnostic, ScanStats, Signal, run_confirmation_screener
 from session_calendar import nyse_session, previous_nyse_trading_day
 from state import AlertState
@@ -51,6 +52,7 @@ def load_config(*, require_smtp: bool = False) -> dict:
         "strict_separation": os.getenv("STRICT_BLUE_ABOVE", "false").lower() == "true",
         "max_workers": int(os.getenv("MAX_WORKERS", "6")),
         "daily_batch_size": int(os.getenv("DAILY_BATCH_SIZE", "50")),
+        "max_single_retries": int(os.getenv("DAILY_MAX_SINGLE_RETRIES", "20")),
     }
 
 
@@ -102,9 +104,11 @@ def write_reports(
         f"邮件是否发送：{'是' if email_sent else '否'}",
         f"检测时间：{detected_at.isoformat()}",
     ]
-    warning = completeness_warning(stats, incomplete_universe_reasons())
-    if warning:
-        lines.append(warning)
+    integrity = getattr(stats, "integrity", None)
+    if integrity is not None:
+        banner = warning_banner(integrity)
+        if banner:
+            lines.append(banner.rstrip("\n"))
     (OUTPUT_DIR / "dxdx_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -145,7 +149,14 @@ def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_ru
         require_strict_separation=cfg["strict_separation"],
         max_workers=cfg["max_workers"],
         batch_size=cfg.get("daily_batch_size", 50),
+        max_single_retries=cfg.get("max_single_retries", 20),
     )
+    integrity = attach_integrity(total, classify_integrity(
+        pool_count=total.pool_count,
+        fetched_count=total.fetched_count,
+        missing_symbols=total.failed_symbols,
+        critical_reasons=incomplete_universe_reasons(),
+    ))
     new_signals = state.filter_new(all_signals)
     started = now or datetime.now()
     if dry_run:
@@ -153,6 +164,15 @@ def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_ru
         total.total_runtime_seconds = time.perf_counter() - runtime_started
         _log_confirmation_timing(total)
         return new_signals, total, False
+    if integrity.tier == DataTier.CRITICAL:
+        require_smtp_config(cfg)
+        subject, body = failure_notification("美股日线抄底雷达", integrity)
+        send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], subject, body)
+        state.save()
+        write_reports([], total, email_sent=False, detected_at=started, daily_diagnostics=daily_rows)
+        total.total_runtime_seconds = time.perf_counter() - runtime_started
+        _log_confirmation_timing(total)
+        return [], total, False
     if not new_signals:
         write_reports([], total, email_sent=False, detected_at=started, daily_diagnostics=daily_rows)
         state.save()
@@ -161,6 +181,7 @@ def run_confirmation(cfg: dict, symbols: list[str], state: AlertState, *, dry_ru
         return [], total, False
     require_smtp_config(cfg)
     subject, body = format_signals_email(new_signals, pool_count=total.pool_count, scan_time=started)
+    body = prepend_banner(body, integrity)
     send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], subject, body)
     for signal in new_signals:
         state.mark_sent(signal)
@@ -201,7 +222,7 @@ def replay_daily(symbol: str, date: str) -> int:
     rows = []
     for adjusted in (True, False):
         for period in ("3y", "5y", "max"):
-            daily = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=adjusted, prepost=False).rename(columns=str.lower)
+            daily = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=adjusted, prepost=False, timeout=10).rename(columns=str.lower)
             daily = daily.dropna(subset=["open", "high", "low", "close"])
             match = daily.loc[pd.DatetimeIndex(daily.index).tz_convert("America/New_York").normalize() == target] if not daily.empty else daily
             if match.empty:
@@ -231,7 +252,10 @@ def main() -> int:
     if args.replay_daily:
         return replay_daily(*args.replay_daily)
     _signals, stats, _sent = run_confirmation(config, get_universe(), AlertState(), dry_run=args.dry_run)
-    return log_incomplete_results(log, incomplete_data_reasons(stats, incomplete_universe_reasons()))
+    integrity = getattr(stats, "integrity", None)
+    if integrity is None:
+        integrity = classify_integrity(pool_count=stats.pool_count, fetched_count=stats.fetched_count, missing_symbols=list(getattr(stats, "failed_symbols", []) or []), critical_reasons=incomplete_universe_reasons())
+    return finish_integrity(log, integrity)
 
 
 if __name__ == "__main__":

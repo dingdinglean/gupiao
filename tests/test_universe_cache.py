@@ -37,6 +37,39 @@ def write_cache(directory: Path, name: str, symbols: list[str], fetched_at: date
     }).to_csv(directory / f"{name}.csv", index=False)
 
 
+class ConstituentCacheBackupTests(unittest.TestCase):
+    def test_failed_write_restores_the_previous_file(self):
+        original = plausible_symbols("sp500")
+        replacement = plausible_symbols("sp500", extra=3)
+        moment = datetime(2026, 10, 10, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory, patch.object(universe, "CACHE_DIR", Path(directory)):
+            path = Path(directory)
+            write_cache(path, "sp500", original, moment - timedelta(days=1))
+            before = (path / "sp500.csv").read_bytes()
+
+            def bad_to_csv(self, dest, *args, **kwargs):
+                Path(dest).write_text("garbage\n", encoding="utf-8")
+
+            with patch.object(pd.DataFrame, "to_csv", bad_to_csv):
+                with self.assertRaises(Exception):
+                    universe._write_cache("sp500", replacement, moment)
+            self.assertEqual((path / "sp500.csv").read_bytes(), before)
+            self.assertFalse((path / "sp500.csv.bak").exists())
+            self.assertFalse((path / "sp500.csv.tmp").exists())
+
+    def test_successful_write_drops_the_backup(self):
+        original = plausible_symbols("nasdaq100")
+        replacement = plausible_symbols("nasdaq100", extra=2)
+        moment = datetime(2026, 10, 10, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory, patch.object(universe, "CACHE_DIR", Path(directory)):
+            path = Path(directory)
+            write_cache(path, "nasdaq100", original, moment - timedelta(days=1))
+            universe._write_cache("nasdaq100", replacement, moment)
+            stored = pd.read_csv(path / "nasdaq100.csv")
+            self.assertEqual(list(stored["ticker"]), replacement)
+            self.assertFalse((path / "nasdaq100.csv.bak").exists())
+
+
 class CommittedConstituentCacheTests(unittest.TestCase):
     def test_committed_lists_are_plausible_us_stocks(self):
         for name in ("sp500", "nasdaq100"):

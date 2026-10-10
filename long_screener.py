@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -108,6 +108,7 @@ class LongScanStats:
     normalization_seconds: float = 0.0
     indicator_compute_seconds: float = 0.0
     total_runtime_seconds: float = 0.0
+    failed_symbols: list[str] = field(default_factory=list)
 
 
 def _as_new_york_time(now: datetime | pd.Timestamp | None = None) -> pd.Timestamp:
@@ -405,6 +406,7 @@ def run_long_screener(
         daily = daily_map.get(symbol.upper())
         if daily is None or daily.empty:
             stats.failed_count += 1
+            stats.failed_symbols.append(symbol)
             log.warning("%s skipped: no daily history after bounded batch retries", symbol)
         else:
             available.append(symbol)
@@ -424,6 +426,7 @@ def run_long_screener(
                     stats.freshness_rejected_count += sum(not item.completeness_passed for item in symbol_diagnostics)
             except Exception as exc:
                 stats.failed_count += 1
+                stats.failed_symbols.append(symbol)
                 log.warning("%s skipped: %s", symbol, exc)
     stats.indicator_compute_seconds = time.perf_counter() - compute_started
     stats.total_runtime_seconds = time.perf_counter() - started

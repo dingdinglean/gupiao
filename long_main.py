@@ -14,7 +14,7 @@ except ImportError:
     def load_dotenv() -> bool:
         return False
 
-from data_fetcher import completeness_warning, incomplete_data_reasons, log_incomplete_results
+from integrity import DataTier, attach_integrity, classify_integrity, failure_notification, finish_integrity, prepend_banner, warning_banner
 from long_screener import LongDiagnostic, LongScanStats, LongSignal, run_long_screener
 from notifier import format_long_signals_email, send_email
 from state import AlertState
@@ -99,9 +99,11 @@ def write_reports(
         f"邮件是否发送：{'是' if email_sent else '否'}",
         f"检测时间：{detected_at.isoformat()}",
     ]
-    warning = completeness_warning(stats, incomplete_universe_reasons())
-    if warning:
-        lines.append(warning)
+    integrity = getattr(stats, "integrity", None)
+    if integrity is not None:
+        banner = warning_banner(integrity)
+        if banner:
+            lines.append(banner.rstrip("\n"))
     (OUTPUT_DIR / "long_dxdx_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -115,9 +117,22 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool 
         batch_size=cfg.get("daily_batch_size", 50),
         max_single_retries=cfg.get("max_single_retries", 20),
     )
+    integrity = attach_integrity(stats, classify_integrity(
+        pool_count=stats.pool_count,
+        fetched_count=stats.fetched_count,
+        missing_symbols=stats.failed_symbols,
+        critical_reasons=incomplete_universe_reasons(),
+    ))
     new_signals = state.filter_new(signals)
     if dry_run:
         log.info("Dry run: %s new weekly/monthly DXDX signal(s); email and state update skipped.", len(new_signals))
+        write_reports(signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
+        return signals, stats, False
+    if integrity.tier == DataTier.CRITICAL:
+        require_smtp_config(cfg)
+        subject, body = failure_notification("美股周/月抄底雷达", integrity)
+        send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], subject, body)
+        state.save()
         write_reports(signals, stats, email_sent=False, detected_at=started, diagnostics=diagnostics)
         return signals, stats, False
     if not new_signals:
@@ -127,6 +142,7 @@ def run_once(cfg: dict, symbols: list[str], state: AlertState, *, dry_run: bool 
         return signals, stats, False
     require_smtp_config(cfg)
     subject, body = format_long_signals_email(new_signals, pool_count=stats.pool_count, scan_time=started)
+    body = prepend_banner(body, integrity)
     send_email(cfg["smtp_host"], cfg["smtp_port"], cfg["smtp_user"], cfg["smtp_password"], cfg["to_addrs"], subject, body)
     for signal in new_signals:
         state.mark_sent(signal)
@@ -147,7 +163,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     _signals, stats, _sent = run_once(load_config(), get_universe(), AlertState(STATE_PATH, ttl_days=STATE_TTL_DAYS), dry_run=args.dry_run)
-    return log_incomplete_results(log, incomplete_data_reasons(stats, incomplete_universe_reasons()))
+    integrity = getattr(stats, "integrity", None) or classify_integrity(pool_count=stats.pool_count, fetched_count=stats.fetched_count, missing_symbols=list(getattr(stats, "failed_symbols", []) or []), critical_reasons=incomplete_universe_reasons())
+    return finish_integrity(log, integrity)
 
 
 if __name__ == "__main__":
