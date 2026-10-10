@@ -18,12 +18,12 @@ except ImportError:  # Test/minimal environments can still use process env.
         return False
 
 from notifier import format_signals_email, send_email
-from data_fetcher import configure_yfinance_runtime
+from data_fetcher import completeness_warning, configure_yfinance_runtime, incomplete_data_reasons, log_incomplete_results
 from indicators import compute_macd_divergence
 from screener import DailyDiagnostic, ScanStats, Signal, run_confirmation_screener
 from session_calendar import nyse_session, previous_nyse_trading_day
 from state import AlertState
-from universe import get_universe
+from universe import get_universe, incomplete_universe_reasons
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("dxdx-radar")
@@ -102,6 +102,9 @@ def write_reports(
         f"邮件是否发送：{'是' if email_sent else '否'}",
         f"检测时间：{detected_at.isoformat()}",
     ]
+    warning = completeness_warning(stats, incomplete_universe_reasons())
+    if warning:
+        lines.append(warning)
     (OUTPUT_DIR / "dxdx_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -219,20 +222,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     config = load_config(require_smtp=args.test_email)
     if args.test_email:
         send_test_email(config)
-        return
+        return 0
     if args.replay_daily:
-        replay_daily(*args.replay_daily)
-        return
-    if args.confirm_daily:
-        run_confirmation(config, get_universe(), AlertState(), dry_run=args.dry_run)
-        return
-    run_confirmation(config, get_universe(), AlertState(), dry_run=args.dry_run)
+        return replay_daily(*args.replay_daily)
+    _signals, stats, _sent = run_confirmation(config, get_universe(), AlertState(), dry_run=args.dry_run)
+    return log_incomplete_results(log, incomplete_data_reasons(stats, incomplete_universe_reasons()))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

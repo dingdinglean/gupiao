@@ -15,6 +15,13 @@ on:
 permissions:
   contents: read
 
+# Same Yahoo slot as the other radars. The 23:10 UTC schedule does not overlap
+# the morning jobs, so this does not move the weekly/monthly email.
+concurrency:
+  group: yahoo-market-data
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   scan:
     runs-on: ubuntu-latest

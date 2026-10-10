@@ -24,6 +24,23 @@ ET = ZoneInfo("America/New_York")
 NOW = datetime(2026, 9, 8, 17, 0, tzinfo=ET)
 
 
+def _plausible_index_symbols(name: str) -> list[str]:
+    count = universe.PLAUSIBLE_COUNTS[name][0]
+    symbols: list[str] = []
+    number = 0
+    while len(symbols) < count:
+        chars = []
+        value = number
+        for _ in range(4):
+            chars.append(chr(ord("A") + (value % 26)))
+            value //= 26
+        symbol = "".join(reversed(chars))
+        if universe.is_us_listed_stock(symbol):
+            symbols.append(symbol)
+        number += 1
+    return symbols
+
+
 def daily_frame(*, dxdx: bool = False, bullish: bool = True) -> pd.DataFrame:
     index = pd.date_range(end=pd.Timestamp(NOW.date(), tz=ET), periods=120, freq="B")
     frame = pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1_000_000, "DXDX": False, "BLUE_ABOVE_YELLOW": bullish, "BLUE_FULLY_ABOVE_YELLOW": bullish}, index=index)
@@ -109,9 +126,13 @@ class DualTimeframeRadarTests(unittest.TestCase):
         self.assertTrue(is_us_listed_stock("TSM"))  # US-listed ADR
 
     def test_untrusted_cache_cannot_inject_an_etf(self):
+        plausible = _plausible_index_symbols("sp500")
         with tempfile.TemporaryDirectory() as directory, patch.object(universe, "CACHE_DIR", Path(directory)):
-            pd.DataFrame({"ticker": ["VYM"]}).to_csv(Path(directory) / "sp500.csv", index=False)
-            self.assertEqual(universe._load_or_fetch("sp500", lambda: ["AAPL"]), ["AAPL"])
+            pd.DataFrame({"ticker": ["VYM", "SPY"]}).to_csv(Path(directory) / "sp500.csv", index=False)
+            loaded = universe._load_or_fetch("sp500", lambda: plausible)
+        self.assertEqual(loaded, plausible)
+        self.assertNotIn("VYM", loaded)
+        self.assertNotIn("SPY", loaded)
 
     def test_bullish_trend_is_required(self):
         self.assertIsNone(self._check(daily_frame(dxdx=True, bullish=False), h4_frame()))

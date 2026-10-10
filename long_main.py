@@ -14,10 +14,11 @@ except ImportError:
     def load_dotenv() -> bool:
         return False
 
+from data_fetcher import completeness_warning, incomplete_data_reasons, log_incomplete_results
 from long_screener import LongDiagnostic, LongScanStats, LongSignal, run_long_screener
 from notifier import format_long_signals_email, send_email
 from state import AlertState
-from universe import get_universe
+from universe import get_universe, incomplete_universe_reasons
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("long-dxdx-radar")
@@ -98,6 +99,9 @@ def write_reports(
         f"邮件是否发送：{'是' if email_sent else '否'}",
         f"检测时间：{detected_at.isoformat()}",
     ]
+    warning = completeness_warning(stats, incomplete_universe_reasons())
+    if warning:
+        lines.append(warning)
     (OUTPUT_DIR / "long_dxdx_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -140,10 +144,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
-    run_once(load_config(), get_universe(), AlertState(STATE_PATH, ttl_days=STATE_TTL_DAYS), dry_run=args.dry_run)
+    _signals, stats, _sent = run_once(load_config(), get_universe(), AlertState(STATE_PATH, ttl_days=STATE_TTL_DAYS), dry_run=args.dry_run)
+    return log_incomplete_results(log, incomplete_data_reasons(stats, incomplete_universe_reasons()))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

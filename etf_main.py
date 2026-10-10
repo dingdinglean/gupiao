@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from data_fetcher import completeness_warning, incomplete_data_reasons, log_incomplete_results
 from etf_notifier import format_etf_signals_email, sort_etf_signals
 from etf_screener import run_etf_confirmation_screener
 from etf_universe import ETF_NAMES, ETF_UNIVERSE, etf_name
@@ -97,6 +98,9 @@ def write_etf_reports(
         f"total runtime seconds：{stats.total_runtime_seconds:.3f}",
         f"检测时间：{detected_at.isoformat()}",
     ]
+    warning = completeness_warning(stats)
+    if warning:
+        lines.append(warning)
     (OUTPUT_DIR / "etf_daily_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -192,18 +196,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     if args.replay:
-        replay_etf_daily(*args.replay)
-        return
+        return replay_etf_daily(*args.replay)
     cfg = load_config()
     state = None
     if not args.dry_run:
         ETF_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         state = AlertState(ETF_STATE_PATH)
-    run_etf_confirmation(cfg, state, dry_run=args.dry_run)
+    _signals, stats, _sent = run_etf_confirmation(cfg, state, dry_run=args.dry_run)
+    return log_incomplete_results(log, incomplete_data_reasons(stats))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

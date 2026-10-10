@@ -15,6 +15,13 @@ on:
 permissions:
   contents: read
 
+# 与日线个股、ETF、周月雷达共用 Yahoo 取数槽位，避免同一时刻重复打行情源。
+# 计划时间仍是 08:20 UTC；只有前序任务尚未结束时才会排队，不取消正在发送的邮件。
+concurrency:
+  group: yahoo-market-data
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   resonance:
     runs-on: ubuntu-latest

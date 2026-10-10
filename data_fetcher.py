@@ -74,8 +74,8 @@ def configure_yfinance_runtime() -> str:
             log.warning("yfinance runtime has no set_tz_cache_location capability")
         try:
             yf.config.network.retries = 2
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("yfinance retry configuration failed; continuing with default retries: %s", exc)
         _YF_RUNTIME_READY = True
         log.info("yfinance runtime cache_dir=%s", _YF_CACHE_DIR)
         return _YF_CACHE_DIR
@@ -191,6 +191,39 @@ def _normalize_official_daily(df: pd.DataFrame) -> pd.DataFrame:
     if bool((out.index == out.index.normalize()).all()):
         return out.sort_index()
     return _daily_regular_session_only(out)
+
+
+def incomplete_data_reasons(stats: object | None = None, extra: list[str] | None = None) -> list[str]:
+    """Human-readable reasons a finished run did not cover the requested symbols."""
+    reasons: list[str] = []
+    if stats is not None:
+        failed = int(getattr(stats, "failed_count", 0) or 0)
+        final_failed = int(getattr(stats, "final_failed_count", 0) or 0)
+        if failed:
+            reasons.append(f"数据失败数量={failed}")
+        if final_failed:
+            reasons.append(f"最终失败数量={final_failed}")
+    reasons.extend(extra or [])
+    return reasons
+
+
+def completeness_warning(stats: object | None = None, extra: list[str] | None = None) -> str | None:
+    reasons = incomplete_data_reasons(stats, extra)
+    if not reasons:
+        return None
+    return "结果完整性警告：" + "；".join(reasons)
+
+
+def log_incomplete_results(logger: logging.Logger, reasons: list[str]) -> int:
+    """Return 1 when a completed run should be visible as a failure.
+
+    Callers still finish scanning, writing reports, and applying the existing
+    email rules before checking this code.
+    """
+    if not reasons:
+        return 0
+    logger.error("结果不完整，本次运行将以非零状态结束：%s", "；".join(reasons))
+    return 1
 
 
 def fetch_daily(symbol: str, period: str = "3y") -> pd.DataFrame:

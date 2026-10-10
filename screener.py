@@ -300,6 +300,7 @@ def run_confirmation_screener(
         raw_daily = daily_map.get(symbol.upper())
         if raw_daily is None or raw_daily.empty:
             stats.failed_count += 1
+            log.warning("%s skipped: no daily history after bounded batch retries", symbol)
             continue
         try:
             found, rows = check_symbol_confirmation(

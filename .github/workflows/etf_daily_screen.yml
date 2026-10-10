@@ -2,7 +2,11 @@ name: US ETF Daily DXDX Radar
 
 on:
   schedule:
-    - cron: "0 8 * * 2-6"
+    # Ten minutes after the stock radar so that job takes the shared Yahoo
+    # concurrency slot first. This job still scans only the fixed ETF whitelist
+    # and uses the same email rules; the trigger is offset so the two 08:00 UTC
+    # schedules do not request market data together.
+    - cron: "10 8 * * 2-6"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -13,6 +17,11 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: yahoo-market-data
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   scan:

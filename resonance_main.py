@@ -8,7 +8,7 @@ import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from data_fetcher import BatchDailyFetchStats, fetch_daily_batch
+from data_fetcher import BatchDailyFetchStats, completeness_warning, fetch_daily_batch, incomplete_data_reasons, log_incomplete_results
 from main import load_config, require_smtp_config
 from notifier import send_email
 from resonance.config import ResonanceConfig, load_resonance_config
@@ -25,6 +25,7 @@ log = logging.getLogger("resonance-engine")
 OUTPUT_DIR = Path("output")
 STATE_PATH = Path("data/resonance_state.json")
 ENGINE_VERSION = "Collective Behavior v1"
+_LAST_INCOMPLETE_REASONS: list[str] = []
 
 
 def _individual_recommendations(
@@ -182,6 +183,14 @@ def run(
         f"历史逐日重建：{'是' if reconstruct else '否'}",
         f"截至日期：{cutoff.isoformat()}",
     ]
+    missing = len(config.tickers) - len(daily_map)
+    reasons = incomplete_data_reasons(stats)
+    if missing and not any(reason.startswith("失败取数=") for reason in reasons):
+        reasons.append(f"失败取数={missing}")
+    warning = completeness_warning(extra=reasons)
+    if warning:
+        report.append(warning)
+    _LAST_INCOMPLETE_REASONS[:] = reasons
     write_outputs(events, changes, observations, report, html_preview, config)
     return events, changes
 
@@ -195,7 +204,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     args = parse_args()
     theme_ids = [item.strip() for item in args.themes.split(",") if item.strip()] if args.themes else None
@@ -206,7 +215,8 @@ def main() -> None:
         reconstruct=reconstruction,
         as_of=date.fromisoformat(args.as_of) if args.as_of else (reconstruction[1] if reconstruction else None),
     )
+    return log_incomplete_results(log, _LAST_INCOMPLETE_REASONS)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
